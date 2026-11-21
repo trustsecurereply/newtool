@@ -1507,11 +1507,8 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
         );
 
         await page.setViewport({ width: 1366, height: 768 });
-        // Use HTML version of DuckDuckGo and fix site search parameter
-        let query = `"${industry}" contact OR about OR "${industry}" site:${tld.substring(1)}`;
-        if (dialingCode) {
-          query += ` "${dialingCode}"`;
-        }
+        // Use HTML version of DuckDuckGo
+        let query = `"${industry}" site:${tld.substring(1)}`;
         const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
         await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 90000 });
 
@@ -1519,6 +1516,13 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
         const links = await page.$$eval('a.result__a', anchors =>
           anchors.map(a => a.href)
         );
+
+        // Detect DuckDuckGo block/captcha/no-results page
+        const pageContent = await page.content();
+        const isBlocked = /No results found|captcha|unusual traffic|verify you are|robot|automated/i.test(pageContent);
+        if (isBlocked && links.length === 0) {
+          console.error(`DuckDuckGo blocked or returned no results for TLD ${tld} (industry: ${industry}). Consider using a proxy or adding delays.`);
+        }
 
         if (links.length === 0) {
           fs.writeFileSync(`debug_${tld}_attempt${attempt}.html`, await page.content());
@@ -1591,6 +1595,9 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
     }
 
     tldLinks.forEach(link => allLinks.add(link));
+
+    // Delay between TLD searches to avoid DuckDuckGo rate limiting
+    await wait(randomInt(2000, 5000));
   }
   return [...allLinks];
 }
@@ -2314,6 +2321,9 @@ async function main(io) {
         const websites = await getWebsitesByIndustry(industry, browser, countryCode, dialingCodeToUse);
         console.log(`Found ${websites.length} websites for industry ${industry} in country ${countryCode}.`);
         allWebsitesForCurrentBatch.push(...websites);
+
+        // Delay between country searches to avoid DuckDuckGo rate limiting from datacenter IP
+        await wait(randomInt(5000, 10000));
       }
 
       searchesCompletedInBatch++; // Increment after each country code batch
