@@ -1552,7 +1552,7 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
           resultSelector = 'a.result__a';
         }
         console.log(`[INFO] Searching ${useLite ? 'lite' : 'html'} DDG for ${industry} site:${tld.substring(1)} (attempt ${attempt}/${maxTldRetries})`);
-        await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 90000 });
+        await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: PROTOCOL_TIMEOUT_MS });
 
         // Selector for the active DDG version
         let links = await page.$$eval(resultSelector, anchors =>
@@ -1565,7 +1565,7 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
           const bingQuery = `"${industry}" site:${tld.substring(1)}`;
           const bingUrl = `https://www.bing.com/search?q=${encodeURIComponent(bingQuery)}`;
           console.log(`[INFO] DDG returned 0 results, falling back to Bing for ${industry} site:${tld.substring(1)}`);
-          await page.goto(bingUrl, { waitUntil: 'domcontentloaded', timeout: 90000 });
+          await page.goto(bingUrl, { waitUntil: 'domcontentloaded', timeout: PROTOCOL_TIMEOUT_MS });
           links = await page.$$eval('li.b_algo h2 a, .b_algo h2 a', anchors =>
             anchors.map(a => a.href)
           );
