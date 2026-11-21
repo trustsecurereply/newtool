@@ -15,6 +15,31 @@ let currentCountryCodeIndex = 0;
 const COUNTRY_CODE_BATCH_SIZE = 3;
 const DELAY_BETWEEN_BATCHES_MS = 60 * 1000; // 1 minute delay between batches
 
+// Proxy support for DuckDuckGo (datacenter IPs are often blocked)
+const PROXY_SERVER = process.env.HTTP_PROXY || process.env.HTTPS_PROXY || process.env.PROXY_SERVER || null;
+if (PROXY_SERVER) {
+  console.log(`[INFO] Using proxy server: ${PROXY_SERVER}`);
+}
+
+function getLaunchArgs() {
+  const args = [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-accelerated-2d-canvas',
+    '--disable-gpu',
+    '--ignore-certificate-errors',
+    '--ignore-ssl-errors',
+    '--ignore-certificate-errors-spki-list',
+    '--ignore-ssl-errors-ignore-untrusted',
+    '--disable-blink-features=AutomationControlled'
+  ];
+  if (PROXY_SERVER) {
+    args.unshift(`--proxy-server=${PROXY_SERVER}`);
+  }
+  return args;
+}
+
 
 
 
@@ -1507,13 +1532,23 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
         );
 
         await page.setViewport({ width: 1366, height: 768 });
-        // Use HTML version of DuckDuckGo
+        // Alternate between html and lite DuckDuckGo endpoints to avoid IP blocking
+        const useLite = attempt % 2 === 0;
         let query = `"${industry}" site:${tld.substring(1)}`;
-        const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+        let searchUrl;
+        let resultSelector;
+        if (useLite) {
+          searchUrl = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`;
+          resultSelector = 'a.result-link';
+        } else {
+          searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+          resultSelector = 'a.result__a';
+        }
+        console.log(`[INFO] Searching ${useLite ? 'lite' : 'html'} DDG for ${industry} site:${tld.substring(1)} (attempt ${attempt}/${maxTldRetries})`);
         await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 90000 });
 
-        // Selector for the HTML version
-        const links = await page.$$eval('a.result__a', anchors =>
+        // Selector for the active DDG version
+        const links = await page.$$eval(resultSelector, anchors =>
           anchors.map(a => a.href)
         );
 
@@ -2254,18 +2289,7 @@ async function main(io) {
   let browser = await puppeteer.launch({
     headless: "new",
     ignoreHTTPSErrors: true, // Add this line
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--disable-gpu',
-      '--ignore-certificate-errors',
-      '--ignore-ssl-errors',
-      '--ignore-certificate-errors-spki-list',
-      '--ignore-ssl-errors-ignore-untrusted',
-      '--disable-blink-features=AutomationControlled'
-    ],
+args: getLaunchArgs(),
     protocolTimeout: 90000, // Increase timeout for stealth plugin
   });
 
