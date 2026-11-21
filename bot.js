@@ -14,6 +14,7 @@ let currentIndustryIndex = 0;
 let currentCountryCodeIndex = 0;
 const COUNTRY_CODE_BATCH_SIZE = 3;
 const DELAY_BETWEEN_BATCHES_MS = 60 * 1000; // 1 minute delay between batches
+const PROTOCOL_TIMEOUT_MS = 180000; // 3 minutes for container environments
 
 // Proxy support for DuckDuckGo (datacenter IPs are often blocked)
 const PROXY_SERVER = process.env.HTTP_PROXY || process.env.HTTPS_PROXY || process.env.PROXY_SERVER || null;
@@ -26,13 +27,18 @@ function getLaunchArgs() {
     '--no-sandbox',
     '--disable-setuid-sandbox',
     '--disable-dev-shm-usage',
+    '--single-process',
+    '--no-zygote',
     '--disable-accelerated-2d-canvas',
     '--disable-gpu',
     '--ignore-certificate-errors',
     '--ignore-ssl-errors',
     '--ignore-certificate-errors-spki-list',
     '--ignore-ssl-errors-ignore-untrusted',
-    '--disable-blink-features=AutomationControlled'
+    '--disable-blink-features=AutomationControlled',
+    '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding'
   ];
   if (PROXY_SERVER) {
     args.unshift(`--proxy-server=${PROXY_SERVER}`);
@@ -482,7 +488,7 @@ manualCountryCodesForSearch: [
   maxPagesToVisit: 500,
   maxEmailsPerDomain: 500, // Maximum number of unique emails to collect per domain
   maxPeopleToScrape: 60, // Maximum number of people (names, titles, emails) to scrape per website
-  peoplePageConcurrency: 5,// Number of people pages to scrape concurrently
+  peoplePageConcurrency: 2, // Number of people pages to scrape concurrently (reduced for container environments)
 
 
   emailDelay: { min: 30000, max: 60000 }, // 30 to 60 seconds
@@ -2332,7 +2338,7 @@ async function main(io) {
     headless: "new",
     ignoreHTTPSErrors: true, // Add this line
 args: getLaunchArgs(),
-    protocolTimeout: 90000, // Increase timeout for stealth plugin
+    protocolTimeout: PROTOCOL_TIMEOUT_MS, // Increase timeout for stealth plugin
   });
 
   // Start email queue processor
@@ -2461,7 +2467,7 @@ args: getLaunchArgs(),
             '--ignore-ssl-errors-ignore-untrusted',
             '--disable-blink-features=AutomationControlled'
           ],
-          protocolTimeout: 90000,
+          protocolTimeout: PROTOCOL_TIMEOUT_MS,
         });
         currentIndustryIndex++;
         currentCountryCodeIndex = 0; // Reset country code index for the new industry
@@ -2497,7 +2503,7 @@ args: getLaunchArgs(),
 
           
         ],
-        protocolTimeout: 90000, // Increase timeout for stealth plugin
+        protocolTimeout: PROTOCOL_TIMEOUT_MS, // Increase timeout for stealth plugin
       });
     }
   }
