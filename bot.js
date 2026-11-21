@@ -1598,6 +1598,26 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
                 return null; // uddgUrl is malformed
               }
             }
+
+            // Decode Bing redirect/click tracking links (u= parameter is base64 encoded)
+            if (url.hostname.includes('bing.com') && url.searchParams.has('u')) {
+              const bingRedirect = url.searchParams.get('u');
+              try {
+                // Bing encodes the URL as base64, sometimes with 'a1' prefix
+                let encoded = bingRedirect;
+                if (encoded.startsWith('a1')) {
+                  encoded = encoded.substring(2);
+                }
+                const decoded = Buffer.from(encoded, 'base64').toString('utf-8');
+                const parsedDecoded = new URL(decoded);
+                if (['http:', 'https:'].includes(parsedDecoded.protocol) && parsedDecoded.hostname) {
+                  return decoded;
+                }
+              } catch (e) {
+                // If decoding fails, filter out this bing.com link
+                return null;
+              }
+            }
             return link;
           } catch (e) {
             // If URL is malformed, return null to filter it out later
@@ -1607,6 +1627,15 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
 
         const filteredLinks = cleanedLinks.filter(link => {
           try {
+            const url = new URL(link);
+            // Exclude search engine domains themselves
+            if (url.hostname.includes('bing.com') || url.hostname.includes('duckduckgo.com')) {
+              return false;
+            }
+            // Exclude Bing redirect/click tracking links
+            if (link.includes('/ck/a?') || link.includes('bing.com/ck/a')) {
+              return false;
+            }
             const hasIrrelevantKeyword = CONFIG.irrelevantKeywords.some(keyword => link.includes(keyword));
             return !hasIrrelevantKeyword;
           } catch (error) {
