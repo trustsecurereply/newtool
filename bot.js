@@ -1537,6 +1537,7 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
         let query = `"${industry}" site:${tld.substring(1)}`;
         let searchUrl;
         let resultSelector;
+        let engine = 'ddg';
         if (useLite) {
           searchUrl = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`;
           resultSelector = 'a.result-link';
@@ -1548,15 +1549,27 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
         await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 90000 });
 
         // Selector for the active DDG version
-        const links = await page.$$eval(resultSelector, anchors =>
+        let links = await page.$$eval(resultSelector, anchors =>
           anchors.map(a => a.href)
         );
 
-        // Detect DuckDuckGo block/captcha/no-results page
+        // If DDG returned nothing, fall back to Bing
+        if (links.length === 0) {
+          engine = 'bing';
+          const bingQuery = `"${industry}" site:${tld.substring(1)}`;
+          const bingUrl = `https://www.bing.com/search?q=${encodeURIComponent(bingQuery)}`;
+          console.log(`[INFO] DDG returned 0 results, falling back to Bing for ${industry} site:${tld.substring(1)}`);
+          await page.goto(bingUrl, { waitUntil: 'domcontentloaded', timeout: 90000 });
+          links = await page.$$eval('li.b_algo h2 a, .b_algo h2 a', anchors =>
+            anchors.map(a => a.href)
+          );
+        }
+
+        // Detect block/captcha/no-results page
         const pageContent = await page.content();
         const isBlocked = /No results found|captcha|unusual traffic|verify you are|robot|automated/i.test(pageContent);
         if (isBlocked && links.length === 0) {
-          console.error(`DuckDuckGo blocked or returned no results for TLD ${tld} (industry: ${industry}). Consider using a proxy or adding delays.`);
+          console.error(`${engine.toUpperCase()} blocked or returned no results for TLD ${tld} (industry: ${industry}). Consider using a proxy or adding delays.`);
         }
 
         if (links.length === 0) {
