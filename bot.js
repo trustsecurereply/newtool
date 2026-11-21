@@ -1631,23 +1631,81 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
           }
         }).filter(link => link !== null); // Filter out nulls (malformed URLs)
 
-        const filteredLinks = cleanedLinks.filter(link => {
-          try {
-            const url = new URL(link);
-            // Exclude search engine domains themselves
-            if (url.hostname.includes('bing.com') || url.hostname.includes('duckduckgo.com')) {
-              return false;
-            }
-            // Exclude Bing redirect/click tracking links
-            if (link.includes('/ck/a?') || link.includes('bing.com/ck/a')) {
-              return false;
-            }
-            const hasIrrelevantKeyword = CONFIG.irrelevantKeywords.some(keyword => link.includes(keyword));
-            return !hasIrrelevantKeyword;
-          } catch (error) {
-            return false;
-          }
-        });
+// Search engines and useless sites to exclude from results
+const EXCLUDED_DOMAINS = [
+  'bing.com', 'duckduckgo.com', 'google.com', 'google.', 'translate.google',
+  'wikipedia.org', 'wikimedia.org', 'facebook.com', 'twitter.com', 'x.com',
+  'instagram.com', 'linkedin.com', 'youtube.com', 'yelp.com', 'yellowpages.com',
+  'yellow-page.com', 'manta.com', 'dnb.com', 'hoovers.com', 'crunchbase.com',
+  'zoominfo.com', 'apollo.io', 'glassdoor.com', 'yelp.com', 'foursquare.com',
+  'trustpilot.com', 'sitejabber.com', 'bbb.org', 'amber', 'alibaba.com',
+  'amazon.com', 'ebay.com', 'etsy.com', 'walmart.com', 'craigslist.org',
+  'github.com', 'gitlab.com', 'sourceforge.net', 'medium.com', 'quora.com',
+  'reddit.com', 'pinterest.com', 'tiktok.com', 'snapchat.com', 'whatsapp.com',
+  'telegram.org', 'discord.com', 'slack.com', 'dropbox.com', 'drive.google.com',
+  'docs.google.com', 'sheets.google.com', 'slides.google.com', 'forms.google.com',
+  'blogger.com', 'wordpress.com', 'wix.com', 'squarespace.com', 'weebly.com',
+  'webflow.com', 'shopify.com', 'bigcommerce.com', 'magento.com',
+  'openstreetmap.org', 'maps.google.com', 'googlemaps.com',
+  'weather.com', 'accuweather.com', 'timeanddate.com', 'calendar.google.com',
+  'support.google.com', 'accounts.google.com', 'mail.google.com',
+  'play.google.com', 'apps.apple.com', 'play.google.com/store',
+  'chromewebstore.google.com', 'addons.mozilla.org',
+  'stack overflow', 'stackoverflow.com', 'stackexchange.com',
+  'quora.com', 'ask.com', 'answers.com', 'ehow.com', 'wikihow.com',
+  'imdb.com', 'rottentomatoes.com', 'metacritic.com', 'tvguide.com',
+  'fandom.com', 'gamefaqs.gamespot.com', 'ign.com', 'gamespot.com',
+  'khanacademy.org', 'coursera.org', 'udemy.com', 'skillshare.com',
+  'edx.org', 'udacity.com', 'pluralsight.com', 'codecademy.com',
+  'freecodecamp.org', 'w3schools.com', 'mozilla.org', 'developer.mozilla.org',
+  'apache.org', 'nginx.com', 'mysql.com', 'postgresql.org', 'mongodb.com',
+  'docker.com', 'kubernetes.io', 'aws.amazon.com', 'azure.microsoft.com',
+  'cloud.google.com', 'digitalocean.com', 'heroku.com', 'firebase.google.com',
+  'vercel.com', 'netlify.com', 'cloudflare.com', 'fastly.com',
+  'icann.org', 'whois.com', 'domaintools.com', 'namecheap.com',
+  'godaddy.com', 'hostgator.com', 'bluehost.com', 'siteground.com',
+  'inmotionhosting.com', 'dreamhost.com', 'a2hosting.com',
+  'cpanel.net', 'plesk.com', 'directadmin.com',
+  'web.archive.org', 'archive.org', 'archive.today', 'archive.li',
+  'google.com/maps', 'google.com/earth', 'google.com/translate'
+];
+
+const excludedDomainsLower = EXCLUDED_DOMAINS.map(d => d.toLowerCase());
+
+const filteredLinks = cleanedLinks.filter(link => {
+  try {
+    const url = new URL(link);
+    const host = url.hostname.toLowerCase();
+    const linkLower = link.toLowerCase();
+
+    // Exclude search engine domains themselves
+    if (excludedDomainsLower.some(d => host.includes(d) || host === d)) {
+      return false;
+    }
+
+    // Exclude subdomains of search engines and useless sites
+    if (excludedDomainsLower.some(d => host.endsWith('.' + d.replace('.', '\\.')))) {
+      return false;
+    }
+
+    // Exclude Bing redirect/click tracking links
+    if (linkLower.includes('/ck/a?') || linkLower.includes('bing.com/ck/a')) {
+      return false;
+    }
+
+    // Exclude google translate and similar redirect services
+    if (linkLower.includes('translate.google.com/translate') ||
+        linkLower.includes('google.com/url') ||
+        linkLower.includes('webcache.googleusercontent.com')) {
+      return false;
+    }
+
+    const hasIrrelevantKeyword = CONFIG.irrelevantKeywords.some(keyword => linkLower.includes(keyword));
+    return !hasIrrelevantKeyword;
+  } catch (error) {
+    return false;
+  }
+});
 
         tldLinks = filteredLinks;
         tldSuccess = true;
