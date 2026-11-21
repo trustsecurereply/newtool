@@ -1811,6 +1811,21 @@ async function extractEmailsFromWebsite(url, browser) {
           const foundEmails = content.match(emailRegex) || [];
           foundEmails.forEach(email => scrapedEmails.add(email)); // Scraped emails are added here
 
+          // Extract emails from mailto: links
+          const mailtoLinks = await page.$$eval('a[href*="mailto:"]', anchors =>
+            anchors.map(a => a.href)
+          );
+          mailtoLinks.forEach(href => {
+            try {
+              const mailtoMatch = href.match(/mailto:([^?&]+)/);
+              if (mailtoMatch && mailtoMatch[1]) {
+                scrapedEmails.add(mailtoMatch[1]);
+              }
+            } catch (e) {
+              // ignore malformed mailto links
+            }
+          });
+
           // Regex for phone numbers, including international formats
           const phoneRegex = /(\+\d{1,3}[-.\s]?)?(\(\d{1,4}\)[-.\s]?)?(\d{1,4}[-.\s]?){2,}\d{1,4}/g;
           const foundPhoneNumbers = content.match(phoneRegex) || [];
@@ -2015,43 +2030,32 @@ function isValidName(name, title, irrelevantPhrases) {
 
               // Consolidate all irrelevant terms
               const commonTitles = [
-                'ceo', 'cto', 'cfo', 'cmo', 'cio', 'hr', 'sales', 'marketing', 'support', 'admin', 'manager', 'director',
-                'president', 'founder', 'owner', 'partner', 'head', 'lead', 'vice', 'executive', 'staff', 'team',
-                'contact', 'about', 'home', 'blog', 'news', 'events', 'careers', 'jobs', 'privacy', 'terms', 'legal',
-                'investors', 'media', 'press', 'solutions', 'products', 'services', 'company', 'group', 'inc', 'ltd',
-                'corp', 'llc', 'gmbh', 'ag', 'sa', 'bv', 'pte', 'sarl', 'dr', 'mr', 'ms', 'jr', 'sr', 'prof', 'eng',
-                'phd', 'm.d.', 'm.d', 'esq', 'cpa', 'cfa', 'p.e.', 'p.e', 'access', 'management', 'consulting',
-                // Expanded generic terms
-                'info', 'hello', 'admin', 'support', 'sales', 'marketing', 'enquiries', 'inquiries', 'billing', 'careers',
-                'jobs', 'press', 'media', 'legal', 'privacy', 'terms', 'abuse', '', 'noreply', 'postmaster',
-                'security', 'feedback', 'help', 'office', 'reception', 'frontdesk', 'customerservice', 'customercare',
-                'accounts', 'finance', 'purchasing', 'hr', 'humanresources', 'it', 'tech', 'development', 'design',
-                'operations', 'pr', 'publicrelations', 'investorrelations', 'partnerships', 'affiliates', 'events',
-                'newsletter', 'subscribe', 'unsubscribe', 'notifications', 'updates', 'system', 'daemon', 'hostmaster',
-                'root', 'guest', 'test', 'demo', 'trial', 'info@', 'hello@', 'admin@', 'support@', 'sales@', 'marketing@',
-                'contact@', 'enquiries@', 'inquiries@', 'billing@', 'careers@', 'jobs@', 'press@', 'media@', 'legal@',
-                'privacy@', 'terms@', 'abuse@', '@', 'noreply@', 'postmaster@', 'security@', 'feedback@', 'help@',
-                'office@', 'reception@', 'frontdesk@', 'customerservice@', 'customercare@', 'accounts@', 'finance@',
-                'purchasing@', 'hr@', 'humanresources@', 'it@', 'tech@', 'development@', 'design@', 'operations@', 'pr@',
-                'publicrelations@', 'investorrelations@', 'partnerships@', 'affiliates@', 'events@', 'newsletter@',
-                'subscribe@', 'unsubscribe@', 'notifications@', 'updates@', 'system@', 'daemon@', 'hostmaster@', 'root@',
-                'guest@', 'test@', 'demo@', 'trial@', 'mail', 'email', 'website', 'domain', 'server', 'client', 'user',
-                'account', 'team', 'group', 'department', 'division', 'section', 'unit', 'branch', 'office', 'headquarters',
-                'corporate', 'global', 'international', 'national', 'regional', 'local', 'general', 'main', 'primary',
-                'secondary', 'tertiary', 'first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth',
-                'ninth', 'tenth', 'eleventh', 'twelfth', 'thirteenth', 'fourteenth', 'fifteenth', 'sixteenth', 'seventeenth',
-                'eighteenth', 'nineteenth', 'twentieth', 'twentyfirst', 'twentysecond', 'twentythird', 'twentyfourth',
-                'twentyfifth', 'twentysixth', 'twentyseventh', 'twentyeighth', 'twentyninth', 'thirtieth', 'thirtyfirst',
-                'thirtysecond', 'thirtythird', 'thirtyfourth', 'thirtyfifth', 'thirtysixth', 'thirtyseventh', 'thirtyeighth',
-                'thirtyninth', 'fortieth', 'fortyfirst', 'fortysecond', 'fortythird', 'fortyfourth', 'fortyfifth',
-                'fortysixth', 'fortyseventh', 'fortyeighth', 'fortyninth', 'fiftieth', 'fiftyfirst', 'fiftysecond',
-                'fiftythird', 'fiftyfourth', 'fiftyfifth', 'fiftysixth', 'fiftyseventh', 'fiftyeighth', 'fiftyninth',
-                'sixtieth', 'sixtyfirst', 'sixtysecond', 'sixtythird', 'sixtyfourth', 'sixtyfifth', 'sixtysixth',
-                'sixtyseventh', 'sixtyeighth', 'sixtyninth', 'seventieth', 'seventyfirst', 'seventysecond', 'seventythird',
-                'seventyfourth', 'seventyfifth', 'seventysixth', 'seventyseventh', 'seventyeighth', 'seventyninth',
-                'eightieth', 'eightyfirst', 'eightysecond', 'eightythird', 'eightyfourth', 'eightyfifth', 'eightysixth',
-                'eightyseventh', 'eightyeighth', 'eightyninth', 'ninetieth', 'ninetyfirst', 'ninetysecond', 'ninetythird',
-                'ninetyfourth', 'ninetyfifth', 'ninetysixth', 'ninetyseventh', 'ninetyeighth', 'ninetyninth', 'hundredth'
+                // Company/organization suffixes (not person names)
+                'inc', 'ltd', 'corp', 'llc', 'gmbh', 'ag', 'sa', 'bv', 'pte', 'sarl',
+                'company', 'group', 'solutions', 'products', 'services', 'enterprises',
+                'holdings', 'industries', 'systems', 'technologies', 'international',
+                // Generic navigation/page terms (not people)
+                'home', 'about', 'contact', 'blog', 'news', 'events', 'careers', 'jobs',
+                'privacy', 'terms', 'legal', 'investors', 'media', 'press', 'access',
+                'management', 'consulting', 'admin', 'administrator', 'root', 'guest',
+                'test', 'demo', 'trial', 'noreply', 'postmaster', 'hostmaster',
+                'webmaster', 'mailer-daemon', 'undisclosed-recipients',
+                // Email generic local parts
+                'info', 'hello', 'support', 'sales', 'billing', 'accounts', 'finance',
+                'hr', 'help', 'office', 'security', 'abuse', 'feedback',
+                'newsletter', 'subscribe', 'unsubscribe', 'notifications', 'updates',
+                'system', 'daemon', 'alert', 'alerts', 'report', 'reports',
+                'status', 'update', 'updates', 'service', 'services', 'client',
+                'clients', 'customer', 'customers', 'user', 'users', 'member',
+                'members', 'partner', 'partners', 'affiliate', 'affiliates',
+                'investor', 'investors', 'public', 'relations', 'mediarelations',
+                'team', 'it', 'tech', 'development', 'design', 'operations', 'pr',
+                'publicrelations', 'investorrelations', 'partnerships', 'affiliates',
+                'events', 'mail', 'email', 'website', 'domain', 'server', 'client',
+                'user', 'account', 'department', 'division', 'section', 'unit',
+                'branch', 'office', 'headquarters', 'corporate', 'global',
+                'international', 'national', 'regional', 'local', 'general', 'main',
+                'primary', 'secondary', 'tertiary'
               ];
               const allIrrelevantTerms = new Set([...irrelevantPhrases.map(p => p.toLowerCase()), ...commonTitles]);
 
