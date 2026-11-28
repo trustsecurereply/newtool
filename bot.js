@@ -2117,17 +2117,24 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
                 let engPage;
                 try {
                   engPage = await browser.newPage();
-                  await engPage.evaluateOnNewDocument(() => {
-                    Object.defineProperty(navigator, 'webdriver', {
-                      get: () => false,
+                  try {
+                    await engPage.evaluateOnNewDocument(() => {
+                      Object.defineProperty(navigator, 'webdriver', {
+                        get: () => false,
+                      });
+                      Object.defineProperty(navigator, 'plugins', {
+                        get: () => [1, 2, 3, 4, 5]
+                      });
+                      Object.defineProperty(navigator, 'languages', {
+                        get: () => ['en-US', 'en']
+                      });
                     });
-                    Object.defineProperty(navigator, 'plugins', {
-                      get: () => [1, 2, 3, 4, 5]
-                    });
-                    Object.defineProperty(navigator, 'languages', {
-                      get: () => ['en-US', 'en']
-                    });
-                  });
+                  } catch (e) {
+                    // Stealth injection may fail if page/session is already closed
+                  }
+                  // Small delay to let stealth plugin finish script injection
+                  await wait(500);
+                  if (engPage.isClosed()) continue;
 
                   const randomUA = getRandomUserAgent();
                   await engPage.setUserAgent(randomUA);
