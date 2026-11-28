@@ -22,6 +22,20 @@ if (PROXY_SERVER) {
   console.log(`[INFO] Using proxy server: ${PROXY_SERVER}`);
 }
 
+// User agent rotation to reduce bot detection
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/120.0.0.0 Safari/537.36'
+];
+
+function getRandomUserAgent() {
+  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+}
+
 function getLaunchArgs() {
   const args = [
     '--no-sandbox',
@@ -38,7 +52,18 @@ function getLaunchArgs() {
     '--disable-blink-features=AutomationControlled',
     '--disable-background-timer-throttling',
     '--disable-backgrounding-occluded-windows',
-    '--disable-renderer-backgrounding'
+    '--disable-renderer-backgrounding',
+    '--disable-features=IsolateOrigins,site-per-process',
+    '--disable-site-isolation-trials',
+    '--disable-web-security',
+    '--disable-client-side-phishing-detection',
+    '--disable-sync',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-translate',
+    '--hide-scrollbars',
+    '--mute-audio',
+    '--lang=en-US,en'
   ];
   if (PROXY_SERVER) {
     args.unshift(`--proxy-server=${PROXY_SERVER}`);
@@ -1709,16 +1734,28 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
               Object.defineProperty(navigator, 'webdriver', {
                 get: () => false,
               });
+              Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5]
+              });
+              Object.defineProperty(navigator, 'languages', {
+                get: () => ['en-US', 'en']
+              });
             });
-            await engPage.setUserAgent(
-              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'
-            );
+
+            const randomUA = getRandomUserAgent();
+            await engPage.setUserAgent(randomUA);
+            await engPage.setExtraHTTPHeaders({
+              'Accept-Language': 'en-US,en;q=0.9',
+              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+              'Accept-Encoding': 'gzip, deflate, br',
+              'Upgrade-Insecure-Requests': '1'
+            });
             await engPage.setViewport({ width: 1366, height: 768 });
 
             console.log(`[INFO] Searching ${eng.name} for ${industry} site:${tld.substring(1)}`);
-            await engPage.goto(eng.url, { waitUntil: 'domcontentloaded', timeout: PROTOCOL_TIMEOUT_MS });
+            await engPage.goto(eng.url, { waitUntil: 'networkidle2', timeout: PROTOCOL_TIMEOUT_MS });
             const pageContent = await engPage.content();
-            const isBlocked = /No results found|captcha|unusual traffic|verify you are|robot|automated|access denied|blocked/i.test(pageContent);
+            const isBlocked = /No results found|captcha|unusual traffic|verify you are|robot|automated|access denied|blocked|unusual activity/i.test(pageContent);
             if (isBlocked) {
               console.log(`[INFO] ${eng.name} appears blocked/captcha for ${industry} site:${tld.substring(1)}, skipping engine`);
               try { if (!engPage.isClosed()) await engPage.close(); } catch (e) {}
@@ -1740,8 +1777,8 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
             try { if (engPage && !engPage.isClosed()) await engPage.close(); } catch (e) {}
             continue;
           }
-          // Small delay between engines to avoid overwhelming the browser
-          await wait(1000);
+          // Longer delay between engines to reduce captcha triggering
+          await wait(randomInt(3000, 8000));
         }
 
         if (allEngineLinks.length === 0) {
