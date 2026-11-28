@@ -831,6 +831,7 @@ manualCountryCodesForSearch: [
   maxEmailsPerDomain: 500, // Maximum number of unique emails to collect per domain
   maxPeopleToScrape: 60, // Maximum number of people (names, titles, emails) to scrape per website
   peoplePageConcurrency: 2, // Number of people pages to scrape concurrently (reduced for container environments)
+  searchPagesPerEngine: 5, // Number of search result pages to fetch per engine per TLD
 
 
   emailDelay: { min: 30000, max: 60000 }, // 30 to 60 seconds
@@ -1851,10 +1852,10 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
   let tldsToSearch;
 
   if (countryCode && CONFIG.countryTldMapping[countryCode]) {
-    tldsToSearch = shuffleArray([...CONFIG.countryTldMapping[countryCode]]).slice(0, 15);
+    tldsToSearch = shuffleArray([...CONFIG.countryTldMapping[countryCode]]).slice(0, 50);
     console.log(`Searching TLDs for ${countryCode}: ${tldsToSearch.join(', ')}`);
   } else {
-    tldsToSearch = shuffleArray([...CONFIG.searchTlds]).slice(0, 15);
+    tldsToSearch = shuffleArray([...CONFIG.searchTlds]).slice(0, 50);
     console.log(`Searching global TLDs: ${tldsToSearch.join(', ')}`);
   }
 
@@ -1863,6 +1864,18 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
     let allEngineLinks = [];
 
     // Search engines list (defined once per TLD, reused across proxy attempts)
+    const getEnginePageUrl = (baseUrl, engineName, page) => {
+      if (page === 0) return baseUrl;
+      const sep = baseUrl.includes('?') ? '&' : '?';
+      if (engineName === 'bing') {
+        return baseUrl + sep + 'first=' + (page * 10 + 1);
+      }
+      if (engineName === 'ddg-html' || engineName === 'ddg-lite') {
+        return baseUrl + sep + 's=' + (page * 30);
+      }
+      return baseUrl + sep + 'page=' + (page + 1);
+    };
+
     const engines = [
           {
             name: 'ddg-html',
@@ -1924,7 +1937,7 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
           {
             name: 'mojeek',
             url: `https://www.mojeek.com/search?q=${encodeURIComponent(`"${industry}" site:${tld.substring(1)}`)}`,
-            selector: 'results-standard a, .results-standard a',
+            selector: '.results-standard a, .result a',
             cleanup: (link) => link
           },
           {
@@ -2037,11 +2050,11 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
           }
         ];
 
-        // Try proxies first, then direct connection as final fallback
+        // Try direct connection first, then rotate through proxies if all engines fail
         let proxyAttempts = 0;
         const maxProxyAttempts = proxyList.length;
         let currentProxyIndex = 0;
-        let currentProxy = proxyList.length > 0 ? proxyList[0] : null;
+        let currentProxy = null; // Start with direct connection
         let lastProxy = null;
 
         while (!tldSuccess && proxyAttempts <= maxProxyAttempts) {
@@ -2072,89 +2085,114 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
             let switchedProxy = false;
 
         for (const eng of engines) {
-              let engPage;
-              try {
-                engPage = await browser.newPage();
-                await engPage.evaluateOnNewDocument(() => {
-                  Object.defineProperty(navigator, 'webdriver', {
-                    get: () => false,
+              let engineLinks = [];
+              let switchProxy = false;
+              for (let page = 0; page < CONFIG.searchPagesPerEngine; page++) {
+                let engPage;
+                try {
+                  engPage = await browser.newPage();
+                  await engPage.evaluateOnNewDocument(() => {
+                    Object.defineProperty(navigator, 'webdriver', {
+                      get: () => false,
+                    });
+                    Object.defineProperty(navigator, 'plugins', {
+                      get: () => [1, 2, 3, 4, 5]
+                    });
+                    Object.defineProperty(navigator, 'languages', {
+                      get: () => ['en-US', 'en']
+                    });
                   });
-                  Object.defineProperty(navigator, 'plugins', {
-                    get: () => [1, 2, 3, 4, 5]
+
+                  const randomUA = getRandomUserAgent();
+                  await engPage.setUserAgent(randomUA);
+                  await engPage.setExtraHTTPHeaders({
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Upgrade-Insecure-Requests': '1'
                   });
-                  Object.defineProperty(navigator, 'languages', {
-                    get: () => ['en-US', 'en']
-                  });
-                });
+                  await engPage.setViewport({ width: 1366, height: 768 });
 
-                const randomUA = getRandomUserAgent();
-                await engPage.setUserAgent(randomUA);
-                await engPage.setExtraHTTPHeaders({
-                  'Accept-Language': 'en-US,en;q=0.9',
-                  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                  'Accept-Encoding': 'gzip, deflate, br',
-                  'Upgrade-Insecure-Requests': '1'
-                });
-                await engPage.setViewport({ width: 1366, height: 768 });
+                  const pageUrl = getEnginePageUrl(eng.url, eng.name, page);
+                  console.log(`[INFO] Searching ${eng.name} page ${page + 1} for ${industry} site:${tld.substring(1)} via ${currentProxy || 'direct'}`);
+                  await engPage.goto(pageUrl, { waitUntil: 'networkidle2', timeout: PROTOCOL_TIMEOUT_MS });
 
-                console.log(`[INFO] Searching ${eng.name} for ${industry} site:${tld.substring(1)} via ${currentProxy || 'direct'}`);
-                await engPage.goto(eng.url, { waitUntil: 'networkidle2', timeout: PROTOCOL_TIMEOUT_MS });
-                let pageContent = await engPage.content();
-                let isBlocked = /No results found|captcha|unusual traffic|verify you are|robot|automated|access denied|blocked|unusual activity/i.test(pageContent);
+                  // Try extracting links first — don't skip engines just because "captcha" appears on the page
+                  const engLinks = await engPage.$$eval(eng.selector, anchors =>
+                    anchors.map(a => a.href).filter(h => h && h.startsWith('http'))
+                  );
+                  const cleaned = engLinks.map(eng.cleanup).filter(l => l !== null);
 
-                if (isBlocked && CAPTCHA_API_KEY) {
-                  console.log(`[INFO] ${eng.name} captcha detected, attempting to solve...`);
-                  const solved = await solveRecaptcha(engPage);
-                  if (solved) {
-                    await wait(randomInt(3000, 6000));
-                    pageContent = await engPage.content();
-                    isBlocked = /No results found|captcha|unusual traffic|verify you are|robot|automated|access denied|blocked|unusual activity/i.test(pageContent);
-                  }
-                }
-
-                if (isBlocked) {
-                  console.log(`[INFO] ${eng.name} appears blocked/captcha for ${industry} site:${tld.substring(1)}, skipping engine`);
-                  try { if (!engPage.isClosed()) await engPage.close(); } catch (e) {}
-                  continue;
-                }
-                const engLinks = await engPage.$$eval(eng.selector, anchors =>
-                  anchors.map(a => a.href).filter(h => h && h.startsWith('http'))
-                );
-                const cleaned = engLinks.map(eng.cleanup).filter(l => l !== null);
-              if (cleaned.length > 0) {
-                  console.log(`[INFO] ${eng.name} returned ${cleaned.length} results for ${industry} site:${tld.substring(1)}`);
-                  allEngineLinks.push(...cleaned);
-                } else {
-                  console.log(`[INFO] ${eng.name} returned 0 results for ${industry} site:${tld.substring(1)}`);
-                }
-                try { if (!engPage.isClosed()) await engPage.close(); } catch (e) {}
-                } catch (err) {
-                console.log(`[INFO] ${eng.name} failed for ${industry} site:${tld.substring(1)}: ${err.message}, skipping engine`);
-                try { if (engPage && !engPage.isClosed()) await engPage.close(); } catch (e) {}
-                if (currentProxy && err.message && (err.message.includes('ERR_CONNECTION') || err.message.toLowerCase().includes('timed_out') || err.message.toLowerCase().includes('connection_reset') || err.message.toLowerCase().includes('empty_response') || err.message.includes('Protocol error') || err.message.includes('Session closed'))) {
-                  failedProxies.add(currentProxy);
-                  // Switch proxy immediately on connection failure - don't waste time on remaining engines
-                  proxyAttempts++;
-                  currentProxyIndex++;
-                  if (currentProxyIndex < proxyList.length) {
-                    currentProxy = proxyList[currentProxyIndex];
-                    // Skip already-failed proxies
-                    while (failedProxies.has(currentProxy) && currentProxyIndex < proxyList.length - 1) {
-                      currentProxyIndex++;
-                      currentProxy = proxyList[currentProxyIndex];
-                    }
-                    console.log(`[INFO] Connection failure on ${eng.name}, switching to proxy: ${currentProxy}`);
-                    switchedProxy = true;
-                    break; // Exit engine loop, restart with new proxy
+                  if (cleaned.length > 0) {
+                    console.log(`[INFO] ${eng.name} page ${page + 1} returned ${cleaned.length} results for ${industry} site:${tld.substring(1)}`);
+                    engineLinks.push(...cleaned);
                   } else {
-                    // All proxies exhausted - try direct connection
-                    console.log(`[INFO] All proxies exhausted for ${industry} site:${tld.substring(1)}, trying direct connection...`);
-                    currentProxy = null;
-                    switchedProxy = true;
-                    break;
+                    // No links found — now check if the page is actually blocked/captcha
+                    let pageContent = await engPage.content();
+                    let isBlocked = /No results found|captcha|unusual traffic|verify you are|robot|automated|access denied|blocked|unusual activity/i.test(pageContent);
+
+                    if (isBlocked && CAPTCHA_API_KEY) {
+                      console.log(`[INFO] ${eng.name} page ${page + 1} captcha detected, attempting to solve...`);
+                      const solved = await solveRecaptcha(engPage);
+                      if (solved) {
+                        await wait(randomInt(3000, 6000));
+                        const engLinks2 = await engPage.$$eval(eng.selector, anchors =>
+                          anchors.map(a => a.href).filter(h => h && h.startsWith('http'))
+                        );
+                        const cleaned2 = engLinks2.map(eng.cleanup).filter(l => l !== null);
+                        if (cleaned2.length > 0) {
+                          console.log(`[INFO] ${eng.name} page ${page + 1} returned ${cleaned2.length} results after captcha solve for ${industry} site:${tld.substring(1)}`);
+                          engineLinks.push(...cleaned2);
+                          try { if (!engPage.isClosed()) await engPage.close(); } catch (e) {}
+                          break; // Success after captcha, move to next page
+                        }
+                        pageContent = await engPage.content();
+                        isBlocked = /No results found|captcha|unusual traffic|verify you are|robot|automated|access denied|blocked|unusual activity/i.test(pageContent);
+                      }
+                    }
+
+                    if (isBlocked || cleaned.length === 0) {
+                      try { if (!engPage.isClosed()) await engPage.close(); } catch (e) {}
+                      continue; // Try next page
+                    }
+                  }
+                  try { if (!engPage.isClosed()) await engPage.close(); } catch (e) {}
+                } catch (err) {
+                  console.log(`[INFO] ${eng.name} page ${page + 1} failed for ${industry} site:${tld.substring(1)}: ${err.message}`);
+                  try { if (engPage && !engPage.isClosed()) await engPage.close(); } catch (e) {}
+                  if (currentProxy && err.message && (err.message.includes('ERR_CONNECTION') || err.message.toLowerCase().includes('timed_out') || err.message.toLowerCase().includes('connection_reset') || err.message.toLowerCase().includes('empty_response') || err.message.includes('Protocol error') || err.message.includes('Session closed'))) {
+                    failedProxies.add(currentProxy);
+                    // Switch proxy immediately on connection failure
+                    proxyAttempts++;
+                    currentProxyIndex++;
+                    if (currentProxyIndex < proxyList.length) {
+                      currentProxy = proxyList[currentProxyIndex];
+                      // Skip already-failed proxies
+                      while (failedProxies.has(currentProxy) && currentProxyIndex < proxyList.length - 1) {
+                        currentProxyIndex++;
+                        currentProxy = proxyList[currentProxyIndex];
+                      }
+                      console.log(`[INFO] Connection failure on ${eng.name}, switching to proxy: ${currentProxy}`);
+                      switchProxy = true;
+                      break; // Break page loop, restart with new proxy
+                    } else {
+                      // All proxies exhausted - try direct connection
+                      console.log(`[INFO] All proxies exhausted for ${industry} site:${tld.substring(1)}, trying direct connection...`);
+                      currentProxy = null;
+                      switchProxy = true;
+                      break;
+                    }
                   }
                 }
-                continue;
+                if (switchProxy) break;
+                await wait(randomInt(2000, 5000));
+              }
+              if (switchProxy) {
+                switchedProxy = true;
+                break; // Break engine loop, restart with new proxy
+              }
+              if (engineLinks.length > 0) {
+                allEngineLinks.push(...engineLinks);
               }
               // Delay between engines to reduce rate limiting and captcha triggering
               await wait(randomInt(3000, 8000));
@@ -2191,9 +2229,19 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
                 continue;
               }
             } else {
-              // Direct connection also failed - done with this TLD
-              console.log(`[INFO] Direct connection failed for ${industry} site:${tld.substring(1)}, skipping TLD`);
-              break;
+              // Direct connection failed - try proxies
+              currentProxyIndex = 0;
+              while (currentProxyIndex < proxyList.length && failedProxies.has(proxyList[currentProxyIndex])) {
+                currentProxyIndex++;
+              }
+              if (currentProxyIndex < proxyList.length) {
+                currentProxy = proxyList[currentProxyIndex];
+                console.log(`[INFO] Direct connection failed for ${industry} site:${tld.substring(1)}, trying proxy: ${currentProxy}`);
+                continue;
+              } else {
+                console.log(`[INFO] Direct connection failed and all proxies unavailable for ${industry} site:${tld.substring(1)}, skipping TLD`);
+                break;
+              }
             }
 
           } catch (error) {
@@ -2283,6 +2331,8 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
       // Delay between TLD searches to avoid rate limiting
       await wait(randomInt(2000, 5000));
     }
+
+    return [...allLinks];
   }
 
 // Search engines and useless sites to exclude from results
