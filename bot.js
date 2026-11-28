@@ -2069,7 +2069,9 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
 
           try {
 
-            for (const eng of engines) {
+            let switchedProxy = false;
+
+        for (const eng of engines) {
               let engPage;
               try {
                 engPage = await browser.newPage();
@@ -2126,16 +2128,40 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
                   console.log(`[INFO] ${eng.name} returned 0 results for ${industry} site:${tld.substring(1)}`);
                 }
                 try { if (!engPage.isClosed()) await engPage.close(); } catch (e) {}
-              } catch (err) {
+                } catch (err) {
                 console.log(`[INFO] ${eng.name} failed for ${industry} site:${tld.substring(1)}: ${err.message}, skipping engine`);
                 try { if (engPage && !engPage.isClosed()) await engPage.close(); } catch (e) {}
-                if (currentProxy && err.message && (err.message.includes('ERR_CONNECTION') || err.message.includes('timeout') || err.message.includes('Protocol error') || err.message.includes('Session closed'))) {
-                  markProxyFailed(currentProxy);
+                if (currentProxy && err.message && (err.message.includes('ERR_CONNECTION') || err.message.toLowerCase().includes('timed_out') || err.message.toLowerCase().includes('connection_reset') || err.message.toLowerCase().includes('empty_response') || err.message.includes('Protocol error') || err.message.includes('Session closed'))) {
+                  failedProxies.add(currentProxy);
+                  // Switch proxy immediately on connection failure - don't waste time on remaining engines
+                  proxyAttempts++;
+                  currentProxyIndex++;
+                  if (currentProxyIndex < proxyList.length) {
+                    currentProxy = proxyList[currentProxyIndex];
+                    // Skip already-failed proxies
+                    while (failedProxies.has(currentProxy) && currentProxyIndex < proxyList.length - 1) {
+                      currentProxyIndex++;
+                      currentProxy = proxyList[currentProxyIndex];
+                    }
+                    console.log(`[INFO] Connection failure on ${eng.name}, switching to proxy: ${currentProxy}`);
+                    switchedProxy = true;
+                    break; // Exit engine loop, restart with new proxy
+                  } else {
+                    // All proxies exhausted - try direct connection
+                    console.log(`[INFO] All proxies exhausted for ${industry} site:${tld.substring(1)}, trying direct connection...`);
+                    currentProxy = null;
+                    switchedProxy = true;
+                    break;
+                  }
                 }
                 continue;
               }
               // Delay between engines to reduce rate limiting and captcha triggering
               await wait(randomInt(3000, 8000));
+            }
+
+            if (switchedProxy) {
+              continue; // Restart while loop with new proxy
             }
 
             if (allEngineLinks.length > 0) {
@@ -2149,8 +2175,11 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
               // Mark this proxy as failed
               failedProxies.add(currentProxy);
               proxyAttempts++;
-              // Move to next proxy
+              // Move to next proxy, skipping already-failed ones
               currentProxyIndex++;
+              while (currentProxyIndex < proxyList.length && failedProxies.has(proxyList[currentProxyIndex])) {
+                currentProxyIndex++;
+              }
               if (currentProxyIndex < proxyList.length) {
                 currentProxy = proxyList[currentProxyIndex];
                 console.log(`[INFO] All engines failed with proxy, switching to next proxy: ${currentProxy}`);
@@ -2175,6 +2204,9 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
             }
             proxyAttempts++;
             currentProxyIndex++;
+            while (currentProxyIndex < proxyList.length && failedProxies.has(proxyList[currentProxyIndex])) {
+              currentProxyIndex++;
+            }
             if (currentProxyIndex < proxyList.length) {
               currentProxy = proxyList[currentProxyIndex];
             } else {
