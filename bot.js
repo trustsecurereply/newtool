@@ -16,27 +16,260 @@ const COUNTRY_CODE_BATCH_SIZE = 3;
 const DELAY_BETWEEN_BATCHES_MS = 60 * 1000; // 1 minute delay between batches
 const PROTOCOL_TIMEOUT_MS = 180000; // 3 minutes for container environments
 
-// Proxy support for DuckDuckGo (datacenter IPs are often blocked)
-const PROXY_SERVER = process.env.HTTP_PROXY || process.env.HTTPS_PROXY || process.env.PROXY_SERVER || null;
-if (PROXY_SERVER) {
-  console.log(`[INFO] Using proxy server: ${PROXY_SERVER}`);
-}
+// Proxy support with rotation — Proxyscrape API + static list
+const PROXY_API_KEY = 'HVIsHemQvnWDqumZo9707iGXo0VpmypJaj4S51RiLUHMBtuYS1cpGcHQFSgTrshR';
+const PROXY_API_URL = `https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=ip:port&format=text&timeout=10000&api_key=${PROXY_API_KEY}`;
 
-// User agent rotation to reduce bot detection
-const USER_AGENTS = [
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/120.0.0.0 Safari/537.36'
+// Static proxy list (from spys.one) — if one fails, moves to next
+const STATIC_PROXY_LIST = [
+  '107.155.87.251:3128', '222.167.236.151:8080', '222.167.236.73:8080', '45.26.30.144:8888',
+  '12.50.107.219:80', '66.210.33.34:8080', '154.12.231.32:80', '85.239.235.128:3128',
+  '198.111.166.184:80', '38.226.48.45:999', '64.188.29.191:8080', '132.145.164.194:2192',
+  '67.20.129.199:8080', '38.127.179.219:41923', '143.198.135.176:80', '179.253.66.78:3128',
+  '98.147.60.146:48678', '43.159.128.164:10000', '68.169.55.189:80', '70.61.188.34:3128',
+  '68.225.17.237:4228', '216.125.18.67:3128', '75.102.134.109:8080', '172.86.126.201:3128',
+  '38.180.137.149:999', '108.170.12.13:80', '98.153.152.141:7070', '96.3.60.222:80',
+  '3.224.26.242:80', '199.66.182.232:4145', '104.168.134.178:3128', '47.88.14.212:3128',
+  '5.161.55.103:3128', '40.113.234.46:8080', '64.130.54.246:3128', '72.205.0.67:4145',
+  '98.170.57.231:4145', '198.98.51.187:3128', '201.79.106.25:3128', '173.205.202.33:8181',
+  '35.245.216.241:443', '43.130.53.240:35643', '24.102.236.218:8888', '69.48.201.94:80',
+  '167.148.33.176:3128', '204.8.189.118:1080', '52.173.28.127:8080', '132.145.207.194:8080',
+  '98.154.21.253:4228', '116.204.166.178:8080', '69.75.140.157:8080', '162.255.110.24:8080',
+  '12.50.107.221:80', '199.102.104.70:4145', '45.66.156.107:2080', '170.9.13.229:2020',
+  '154.53.61.174:3128', '177.202.88.184:3128', '24.173.217.114:55443', '97.76.251.138:8080',
+  '192.252.211.193:4145', '45.79.62.195:3128', '141.148.8.171:1080', '47.85.9.228:10800',
+  '184.182.240.211:4145', '70.166.65.160:4145', '45.61.133.104:7777', '72.194.42.156:4145',
+  '24.106.221.230:53281', '192.171.18.128:1080', '167.99.173.119:3128', '75.102.134.110:8080',
+  '192.111.129.150:4145', '184.181.178.33:4145', '98.191.0.37:4145', '67.201.39.14:4145',
+  '98.188.47.150:4145', '184.178.172.25:15291', '162.248.227.230:3128', '173.205.202.241:8181',
+  '69.164.215.77:3128', '163.245.222.247:3128', '34.42.192.244:8888', '116.204.166.153:8080',
+  '207.246.102.111:8888', '45.17.96.43:8888', '102.129.137.249:8080', '167.172.250.185:999',
+  '129.146.7.166:80', '168.235.80.215:3128', '20.228.172.227:3128', '205.172.58.121:3128',
+  '75.102.134.1:8080', '74.62.179.122:8080', '107.173.41.13:3128', '23.254.195.190:1080',
+  '40.160.36.112:999', '24.72.215.236:8246', '154.26.232.100:10086', '159.89.138.136:3128',
+  '185.147.157.135:3128', '116.204.166.202:8080', '15.204.129.229:8080', '209.145.53.118:8080',
+  '205.172.56.239:3128', '70.63.90.245:8080', '38.43.93.161:8000', '104.243.157.1:8080',
+  '13.59.11.63:3128', '12.49.24.22:8080', '206.135.80.74:999', '184.181.217.194:4145',
+  '158.101.8.92:1080', '178.156.206.253:8118', '12.218.209.130:53281', '49.51.252.36:3128',
+  '108.170.12.12:80', '20.98.45.49:3128', '82.29.72.145:30501', '177.3.34.2:3128',
+  '201.58.182.153:3128', '104.36.236.101:8080', '107.172.234.212:3128', '23.185.192.66:8181',
+  '146.190.60.147:8011', '108.170.12.11:80', '34.102.0.242:443', '67.201.35.145:4145',
+  '204.9.208.153:8080', '216.49.115.7:8080', '184.170.251.30:11288', '34.125.117.216:443',
+  '45.79.62.197:3128', '152.86.78.16:1080', '143.42.6.185:3128', '192.252.210.233:4145',
+  '69.144.137.154:8080', '213.142.152.123:31280', '207.246.234.115:4669', '192.92.182.221:8080',
+  '104.36.237.230:8080', '50.104.182.9:3128', '144.31.66.195:8888', '172.236.235.129:3128',
+  '206.246.26.65:1080', '63.175.157.2:30005', '2.27.9.217:3128', '172.85.99.64:16062',
+  '172.245.64.104:8888', '67.43.112.129:8080', '173.205.202.225:8181', '208.67.28.29:58090',
+  '174.75.34.109:80', '108.161.135.118:80', '185.213.91.24:9100', '23.225.30.118:9999',
+  '108.170.12.10:80', '116.204.166.148:8080', '143.42.121.126:3086', '104.251.93.95:16062',
+  '24.153.226.234:8056', '38.156.141.96:999', '66.170.46.17:1080', '51.81.22.6:18080',
+  '157.230.134.174:3128', '172.85.99.53:16062', '20.171.155.180:3128', '107.210.56.161:80',
+  '31.76.42.91:3128', '167.71.115.154:3128', '216.9.225.61:1080', '72.195.101.99:4145',
+  '50.222.120.243:1080', '192.6.154.179:3128', '154.29.145.165:1080', '95.81.92.173:3128',
+  '35.238.48.39:8888', '172.233.182.154:51517', '38.172.125.42:1080', '107.173.125.200:443',
+  '75.102.134.206:8080', '129.158.48.4:9050', '45.79.62.98:3128', '38.156.145.128:999',
+  '64.130.54.245:3128', '167.99.3.26:6666', '52.15.61.255:3128', '172.86.72.37:3128',
+  '104.218.199.16:16062', '18.222.225.236:3128', '154.17.8.103:1680', '74.214.254.17:8080',
+  '24.249.199.4:4145', '5.78.181.0:9052', '72.194.42.131:4145', '12.50.107.220:80',
+  '64.83.17.183:8888', '192.73.243.98:3128', '4.227.178.164:3128', '18.223.1.23:3128',
+  '206.135.80.94:999', '104.218.199.115:16062', '40.90.200.185:3128', '45.61.129.165:9050',
+  '199.66.183.226:4145', '47.251.249.48:7777', '24.121.176.155:1080', '104.218.199.17:16062',
+  '104.218.199.245:16062', '47.251.166.203:1080', '15.204.245.180:8088', '12.50.107.222:80',
+  '38.252.228.2:999', '129.146.163.237:8888', '129.80.80.197:9050', '72.207.109.5:4145',
+  '104.218.199.8:16062', '12.50.107.217:80', '47.85.13.198:1080', '104.251.93.103:16062',
+  '104.251.93.55:16062', '172.86.84.97:1085', '23.191.176.193:1080', '95.182.114.15:3128',
+  '40.160.73.206:8099', '208.67.28.27:58090', '167.99.8.113:8011', '216.105.128.144:4145',
+  '74.131.237.22:1080', '38.226.48.42:999', '16.5.163.105:10802', '184.170.169.216:8888',
+  '71.78.199.161:1080', '204.9.208.73:8080', '216.105.130.131:4145', '67.204.153.223:1080',
+  '103.11.76.177:10808', '137.131.46.178:7890', '38.226.48.43:999', '149.104.29.39:20000',
+  '208.67.28.19:58090', '104.237.139.220:3128', '108.170.12.14:80', '216.105.143.146:4145',
+  '198.252.108.20:9050', '172.235.147.5:3128', '67.201.58.190:4145', '206.135.80.78:999',
+  '104.225.220.233:80', '142.249.112.84:8088', '104.161.23.122:5006', '206.135.80.194:999',
+  '34.148.25.49:8080', '104.219.55.50:8118', '96.18.6.140:8080', '72.206.74.126:4145',
+  '43.153.28.68:3128', '104.251.93.219:16062', '67.205.161.254:8118', '104.251.93.129:16062',
+  '138.2.216.186:1080', '68.71.242.118:4145', '31.44.5.192:1081', '172.85.99.179:16062',
+  '130.51.22.190:3080', '222.167.236.143:8080', '167.99.8.113:8017', '148.153.56.51:80',
+  '104.129.203.244:8800', '104.129.203.244:9443', '66.175.235.158:8118', '66.231.128.103:1080',
+  '104.129.203.85:9480', '8.221.106.175:7000', '208.64.37.70:8000', '116.204.166.132:8080',
+  '208.95.22.65:8282', '172.212.125.72:3128', '204.13.233.74:3128', '172.85.99.37:16062',
+  '184.170.104.86:8888', '199.38.169.219:8080', '184.170.104.86:80', '43.153.123.79:80',
+  '72.207.33.64:4145', '64.227.0.146:3129', '35.212.160.97:3128', '164.92.105.30:1080',
+  '104.218.199.249:16062', '204.9.208.237:8080', '116.204.166.205:8080', '167.99.3.26:6337',
+  '34.153.18.123:443', '201.34.153.192:3128', '192.255.228.188:3128', '104.218.199.199:16062',
+  '172.85.99.192:16062', '116.204.166.51:8080', '116.204.166.151:8080', '157.230.179.200:3128',
+  '116.204.166.200:8080', '104.251.93.248:16062', '116.204.166.199:8080', '167.99.3.26:8242',
+  '167.99.3.26:6250', '167.99.3.26:8083', '116.204.166.48:8080', '159.223.142.17:3128',
+  '167.99.3.26:7621', '172.85.99.17:16062', '172.239.170.24:3128', '152.53.81.29:8888',
+  '69.166.8.100:3128', '186.244.208.185:808', '203.31.199.68:8118', '144.31.40.34:3128',
+  '116.204.166.49:8080', '172.85.99.63:16062', '152.70.156.142:3128', '3.12.102.40:3128',
+  '116.204.166.40:8080', '207.180.29.28:3128', '104.218.199.74:16062', '172.85.99.150:16062',
+  '209.255.132.243:8080', '205.164.46.6:3185', '168.220.92.179:8081', '18.117.194.82:3128',
+  '47.254.31.207:1080', '79.127.223.28:8080', '31.76.84.141:1081', '104.251.93.159:16062',
+  '148.153.73.246:8080', '79.127.223.56:8070', '23.247.128.4:9005', '50.242.55.85:1080',
+  '34.162.194.108:443', '205.164.46.6:3125', '144.31.64.67:3128', '144.31.55.116:3128',
+  '208.105.13.2:1080', '146.190.0.12:8080', '146.190.60.147:8018', '104.218.199.24:16062',
+  '154.9.26.161:9050', '209.50.255.91:1080', '23.155.156.3:1080', '158.101.23.103:40002',
+  '72.36.32.222:9050', '45.74.31.42:6600', '107.174.66.209:3128', '172.109.168.65:1080',
+  '134.209.64.182:3128', '67.225.241.201:3128', '70.32.0.18:3128', '66.94.112.133:1088',
+  '38.102.238.81:80', '34.162.141.126:443', '216.51.177.106:1080', '20.83.147.124:3128',
+  '68.64.179.186:8080', '23.94.68.53:3128', '142.93.65.222:3129', '12.199.82.226:8080',
+  '104.161.23.122:5060', '69.87.216.54:7989', '143.20.185.219:8118', '104.251.93.144:16062',
+  '155.138.221.32:1082', '155.138.236.211:18080', '38.18.230.153:8888', '172.245.168.179:21241',
+  '157.245.129.129:10000', '96.60.107.30:9050', '12.199.82.230:8080', '104.251.93.244:16062',
+  '167.99.3.26:13629', '75.102.134.202:8080', '47.254.122.220:5443', '159.223.167.188:10000',
+  '72.201.137.8:1080', '147.124.220.64:1080', '193.122.239.127:3128', '64.83.11.169:8880',
+  '173.205.202.11:8181', '23.254.233.221:1080', '23.95.37.207:3128', '157.245.129.129:10000',
+  '134.195.210.155:3128', '34.69.84.111:443', '143.20.185.219:9150', '113.20.7.76:30002',
+  '104.251.93.22:16062', '149.248.194.233:8888', '170.39.31.113:8080', '158.101.99.182:1080',
+  '172.85.99.128:16062', '149.248.213.249:9000', '23.95.60.62:8080', '23.254.196.69:8888',
+  '129.153.105.194:9050', '208.92.216.54:1080', '149.104.4.88:10809', '37.46.18.192:1080',
+  '31.59.139.118:9050', '154.26.232.100:3128', '192.163.200.82:17071', '181.214.152.92:8000',
+  '47.85.37.60:1080', '104.218.199.26:16062', '104.161.23.122:5003', '20.121.179.183:3001',
+  '157.254.223.42:1080', '159.223.167.188:10000', '181.214.152.92:3128', '12.199.82.229:8080',
+  '20.121.179.183:3002', '75.46.35.87:80', '104.244.95.184:1088', '209.151.155.46:8080',
+  '64.83.11.169:8888', '167.99.3.26:10919', '167.99.3.26:10810', '205.164.46.6:3124',
+  '20.121.179.183:3005', '158.101.1.100:42171', '205.164.46.6:3137', '162.243.172.237:8118',
+  '103.195.102.123:10813', '98.175.31.222:4145', '154.38.165.63:3128', '45.77.146.130:1080',
+  '134.199.204.161:3128', '222.167.236.72:8080', '71.44.207.66:1080', '137.66.24.131:1080',
+  '71.168.71.12:8890', '147.93.176.66:3128', '64.112.40.81:8888', '54.153.26.143:3128',
+  '158.101.23.103:40001', '149.248.18.106:1081', '20.75.169.229:3000', '167.99.3.26:7395',
+  '192.254.65.12:1080', '45.76.13.121:49995', '47.253.185.151:3128', '47.251.127.154:1080',
+  '20.121.179.183:3000', '103.195.102.123:10808', '129.146.121.2:10808', '146.190.41.200:3128',
+  '150.136.58.221:1080', '35.153.161.173:8080', '154.17.9.96:3096', '209.160.241.5:1080',
+  '167.71.102.253:3128', '5.161.204.82:8888', '47.251.100.26:3128', '146.235.220.109:9050',
+  '92.63.225.173:3128', '64.23.232.59:3128', '129.80.56.169:3128', '162.214.74.29:8085',
+  '162.214.159.94:3128', '18.221.175.172:8000', '170.106.188.46:5432', '2.27.47.146:3128',
+  '67.205.161.254:9050', '172.82.64.79:3128', '13.56.188.38:80', '13.56.188.38:8080',
+  '72.241.55.239:8080', '18.224.158.143:8080', '104.233.202.124:22609', '207.57.123.131:9000',
+  '98.88.36.190:8080', '157.151.196.142:1080', '98.84.217.196:8080', '98.10.49.48:1080',
+  '198.44.179.236:3128', '104.218.199.152:16062', '88.210.37.30:3128', '116.204.166.44:8080',
+  '217.216.67.197:3128', '152.70.156.142:1080', '222.167.236.247:8080', '3.14.230.162:8080',
+  '116.204.166.204:8080', '208.95.20.33:8282', '13.56.147.239:3128', '3.19.55.34:3128',
+  '104.218.199.159:16062'
 ];
 
-function getRandomUserAgent() {
-  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+// Additional proxies from spys.one
+const ADDITIONAL_PROXY_LIST = [
+  '202.40.180.145:38423', '31.57.178.195:8080', '125.209.110.83:39617', '2.237.63.228:80',
+  '103.51.223.133:8080', '91.107.186.23:8081', '173.212.207.102:1214', '34.42.192.244:8888',
+  '216.125.18.67:3128', '143.42.121.126:3086', '31.28.4.192:80', '172.236.235.129:8888',
+  '124.108.19.6:9292', '190.103.16.70:999', '91.193.238.172:10808', '180.211.93.110:8080',
+  '12.50.107.219:80', '176.191.124.3:80', '45.195.90.142:8080', '207.180.254.198:8080',
+  '163.172.167.48:80', '109.199.119.160:80', '210.8.69.103:808', '138.0.143.120:8080',
+  '197.221.234.149:80', '103.131.19.51:8080', '110.38.234.74:1256', '110.39.156.195:8080',
+  '41.220.16.211:80', '154.12.231.32:80', '149.18.81.114:7890', '198.111.166.184:80',
+  '202.169.229.139:53281', '64.188.29.191:8080', '96.1.101.113:80', '62.60.216.244:3128',
+  '47.250.140.201:7000', '38.127.179.219:41923', '197.221.249.196:80', '185.118.51.163:3128',
+  '202.21.101.37:8088', '210.61.216.63:60808', '143.198.135.176:80', '182.16.171.65:43188',
+  '158.101.152.7:7890', '103.56.206.77:8099', '150.140.148.235:80', '103.141.244.139:8080',
+  '200.116.198.222:9812', '171.253.93.127:2080', '185.85.111.18:80', '94.70.148.177:8080',
+  '68.169.55.189:80', '77.242.177.57:3128', '38.43.158.7:8080', '117.20.31.166:8080',
+  '45.67.213.4:3128', '104.105.4.195:10001', '104.111.32.26:10002', '213.171.212.110:8080',
+  '185.222.30.155:31623', '178.128.223.15:3128', '197.221.235.122:80', '103.107.136.70:8081',
+  '85.214.107.177:80', '103.7.248.24:8080', '197.221.240.178:80', '43.224.171.232:8080',
+  '82.137.90.253:80', '116.104.52.124:2073', '124.6.143.5:8080', '197.221.249.197:80',
+  '20.235.56.94:8080', '45.117.60.150:8080', '41.65.103.168:8080', '211.22.151.163:60808',
+  '106.104.177.158:60808', '158.247.125.5:9443', '77.77.210.90:21056', '154.208.58.89:8080',
+  '194.14.207.87:8001', '108.170.12.13:80', '103.84.56.101:8080', '72.56.73.23:80',
+  '43.248.254.130:83', '185.247.141.86:3128', '194.186.246.22:8888', '164.52.11.194:18080',
+  '45.198.8.110:8080', '193.233.90.71:40000', '42.112.14.230:2080', '91.213.99.134:3128',
+  '197.221.237.248:80', '88.156.178.59:1122', '103.155.166.226:7850', '103.66.47.10:8080',
+  '181.114.62.1:8085', '201.139.115.206:8082', '109.122.203.91:3128', '45.195.91.59:8080',
+  '103.158.237.90:8080', '82.41.42.140:8181', '103.171.183.129:3125', '157.15.1.190:8080',
+  '96.3.60.222:80', '130.33.157.174:3128', '190.103.16.93:999', '3.224.26.242:80',
+  '47.254.213.60:1082', '139.255.94.122:39635', '195.72.143.238:8080', '165.99.102.66:1452',
+  '5.22.217.168:3128', '5.181.178.46:8080', '154.65.39.8:80', '123.231.252.218:8080',
+  '45.6.224.76:1256', '103.172.70.153:9191', '45.238.220.1:8181', '103.246.109.114:8080',
+  '207.246.234.115:4669', '206.42.117.129:8080', '165.22.99.36:8015', '37.193.95.9:10808',
+  '180.149.235.41:311', '43.167.240.38:8118', '78.142.61.76:3128', '83.118.60.147:8213',
+  '188.165.76.198:4040', '57.128.44.204:3128', '43.164.129.36:3128', '63.175.157.2:30005',
+  '172.85.99.64:16062', '201.139.115.38:8080', '185.202.165.1:53281', '8.220.189.51:8118',
+  '203.76.220.126:16464', '27.131.14.9:8812', '172.245.64.104:8888', '110.93.218.62:8080',
+  '119.159.251.98:8080', '183.110.216.159:8091', '174.75.34.109:80', '145.239.80.10:3128',
+  '178.253.38.101:10808', '103.148.217.247:8080', '108.161.135.118:80', '129.150.39.242:8118',
+  '41.33.172.171:8080', '91.217.33.161:8080', '108.170.12.10:80', '113.176.118.255:7654',
+  '31.202.49.61:33761', '131.163.89.148:3128', '123.253.136.159:1256', '139.84.135.33:80',
+  '110.39.173.100:8080', '122.129.80.123:8080', '197.255.125.12:80', '101.53.238.37:8080',
+  '104.251.93.95:16062', '119.63.130.153:8080', '24.153.226.234:8056', '82.165.182.74:8080',
+  '103.86.135.98:8080', '77.238.79.111:8080', '190.122.185.170:999', '183.110.216.159:8090',
+  '45.168.244.16:8080', '51.81.22.6:18080', '110.38.233.122:8080', '113.171.152.72:8080',
+  '45.194.41.70:8080', '185.109.244.69:8080', '42.115.112.128:8080', '80.87.193.111:12345',
+  '159.65.195.221:3128', '202.142.167.194:8080', '172.85.99.53:16062', '157.101.165.36:80',
+  '103.151.17.201:8080', '152.32.68.171:65535', '159.65.27.1:10000', '64.176.55.231:8886',
+  '95.0.15.137:8080', '107.210.56.161:80', '31.76.42.91:3128', '167.71.115.154:3128',
+  '31.57.178.211:8080', '47.80.26.236:8080', '178.217.99.33:3129', '96.9.229.25:8118',
+  '43.129.170.202:8080', '192.6.154.179:3128', '45.174.149.222:999', '37.252.188.101:3128',
+  '41.217.220.61:32650', '47.79.90.218:8080', '47.250.112.180:443', '35.238.48.39:8888',
+  '172.233.182.154:51517', '152.42.192.59:3128', '209.38.24.108:3128', '38.76.166.241:8443',
+  '107.173.125.200:443', '129.151.130.247:1111', '80.246.16.160:3128', '193.233.220.20:80',
+  '103.80.87.30:3128', '154.127.70.1:1976', '58.27.200.225:8080', '217.142.139.207:8085',
+  '148.253.212.68:8080', '77.163.47.213:3128', '45.194.41.155:8080'
+];
+
+// Merge additional proxies into static list
+const STATIC_PROXY_LIST_MERGED = [...STATIC_PROXY_LIST, ...ADDITIONAL_PROXY_LIST];
+
+// Proxy rotation state
+let proxyList = [...STATIC_PROXY_LIST_MERGED];
+let currentProxyIndex = 0;
+let failedProxies = new Set();
+let proxyFetchAttempted = false;
+
+// Fetch fresh proxies from Proxyscrape API
+async function fetchProxiesFromAPI() {
+  if (proxyFetchAttempted) return;
+  proxyFetchAttempted = true;
+  try {
+    console.log('[INFO] Fetching fresh proxies from Proxyscrape API...');
+    const response = await fetch(PROXY_API_URL, { signal: AbortSignal.timeout(15000) });
+    if (response.ok) {
+      const text = await response.text();
+      const lines = text.trim().split('\n').filter(line => line.match(/^\d+\.\d+\.\d+\.\d+:\d+$/));
+      if (lines.length > 0) {
+        const apiProxies = [...new Set(lines)];
+        proxyList = [...new Set([...STATIC_PROXY_LIST_MERGED, ...apiProxies])];
+        console.log(`[INFO] Loaded ${apiProxies.length} proxies from Proxyscrape API (total: ${proxyList.length})`);
+      } else {
+        console.log('[INFO] Proxyscrape API returned no proxies, using static list');
+      }
+    } else {
+      console.log(`[INFO] Proxyscrape API returned ${response.status}, using static list`);
+    }
+  } catch (e) {
+    console.log(`[INFO] Proxyscrape API fetch failed: ${e.message}, using static list`);
+  }
 }
 
-function getLaunchArgs() {
+// Get the next available proxy (skips failed ones)
+function getNextProxy() {
+  if (proxyList.length === 0) return null;
+  let attempts = 0;
+  while (attempts < proxyList.length) {
+    const proxy = proxyList[currentProxyIndex];
+    currentProxyIndex = (currentProxyIndex + 1) % proxyList.length;
+    attempts++;
+    if (!failedProxies.has(proxy)) {
+      return proxy;
+    }
+  }
+  if (proxyList.length > 0) {
+    failedProxies.clear();
+    currentProxyIndex = 0;
+    return proxyList[0];
+  }
+  return null;
+}
+
+// Mark a proxy as failed
+function markProxyFailed(proxy) {
+  if (proxy) {
+    failedProxies.add(proxy);
+    console.log(`[INFO] Proxy marked failed: ${proxy} (${failedProxies.size}/${proxyList.length} failed)`);
+  }
+}
+
+// Build puppeteer launch args with optional proxy
+function getLaunchArgs(proxy = null) {
   const args = [
     '--no-sandbox',
     '--disable-setuid-sandbox',
@@ -65,10 +298,24 @@ function getLaunchArgs() {
     '--mute-audio',
     '--lang=en-US,en'
   ];
-  if (PROXY_SERVER) {
-    args.unshift(`--proxy-server=${PROXY_SERVER}`);
+  if (proxy) {
+    args.unshift(`--proxy-server=http://${proxy}`);
   }
   return args;
+}
+
+// User agent rotation to reduce bot detection
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/120.0.0.0 Safari/537.36'
+];
+
+function getRandomUserAgent() {
+  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 }
 
 
@@ -1543,10 +1790,29 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
 
     for (const tld of tldsToSearch) {
     let tldLinks = [];
-    const maxTldRetries = 3;
+    let tldSuccess = false;
 
-    for (let attempt = 1; attempt <= maxTldRetries; attempt++) {
-      let tldSuccess = false;
+    // Try direct connection first, then rotate through proxies if all engines fail
+    let proxyAttempts = 0;
+    const maxProxyAttempts = Math.min(proxyList.length, 10); // Try up to 10 proxies per TLD
+    let currentProxy = null; // null = direct connection
+
+    while (!tldSuccess && proxyAttempts <= maxProxyAttempts) {
+      // If we have a proxy, close current browser and relaunch with it
+      if (currentProxy) {
+        try {
+          await browser.close();
+        } catch (e) {
+          // ignore close errors
+        }
+        console.log(`[INFO] Relaunching browser with proxy: ${currentProxy}`);
+        browser = await puppeteer.launch({
+          headless: "new",
+          ignoreHTTPSErrors: true,
+          args: getLaunchArgs(currentProxy),
+          protocolTimeout: PROTOCOL_TIMEOUT_MS,
+        });
+      }
 
       try {
         // Loop over ALL search engines (20+) for each TLD, collect results from all working engines
@@ -1775,58 +2041,129 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
           } catch (err) {
             console.log(`[INFO] ${eng.name} failed for ${industry} site:${tld.substring(1)}: ${err.message}, skipping engine`);
             try { if (engPage && !engPage.isClosed()) await engPage.close(); } catch (e) {}
+            // If using a proxy and it fails, mark it as failed
+            if (currentProxy && err.message && (err.message.includes('ERR_CONNECTION') || err.message.includes('timeout') || err.message.includes('Protocol error') || err.message.includes('Session closed'))) {
+              markProxyFailed(currentProxy);
+            }
             continue;
           }
           // Longer delay between engines to reduce captcha triggering
           await wait(randomInt(3000, 8000));
         }
 
-        if (allEngineLinks.length === 0) {
-          console.log(`[INFO] All search engines returned 0 results for ${industry} site:${tld.substring(1)}, trying Common Crawl fallback...`);
-          // Common Crawl CDX API fallback — no search engine needed
-          try {
-            const ccIndex = 'CC-MAIN-2024-10';
-            const ccUrl = `https://index.commoncrawl.org/${ccIndex}-index?url=*.${tld.substring(1)}&output=json&filter=status:200&filter=mime:text/html&collapse=urlkey&limit=50`;
-            console.log(`[INFO] Querying Common Crawl for *.${tld.substring(1)}...`);
-            const ccResponse = await fetch(ccUrl, { signal: AbortSignal.timeout(30000) });
-            if (ccResponse.ok) {
-              const ccText = await ccResponse.text();
-              const ccLines = ccText.trim().split('\n').filter(Boolean);
-              const ccDomains = new Set();
-              for (const line of ccLines) {
-                try {
-                  const record = JSON.parse(line);
-                  const url = record.url;
-                  const parsed = new URL(url);
-                  const host = parsed.hostname.toLowerCase();
-                  const parts = host.split('.');
-                  if (parts.length >= 2) {
-                    const rootDomain = parts.slice(-2).join('.');
-                    ccDomains.add(`https://${rootDomain}/`);
-                  }
-                } catch (e) {
-                  // skip malformed lines
-                }
-              }
-              if (ccDomains.size > 0) {
-                console.log(`[INFO] Common Crawl returned ${ccDomains.size} domains for *.${tld.substring(1)}`);
-                allEngineLinks.push(...Array.from(ccDomains));
-              } else {
-                console.log(`[INFO] Common Crawl returned 0 domains for *.${tld.substring(1)}`);
-              }
-            } else {
-              console.log(`[INFO] Common Crawl request failed: ${ccResponse.status}`);
-            }
-          } catch (e) {
-            console.log(`[INFO] Common Crawl fallback failed: ${e.message}`);
-          }
-          if (allEngineLinks.length === 0) {
-            console.log(`[INFO] No results from any source for ${industry} site:${tld.substring(1)}, skipping TLD`);
-            continue; // try next TLD
-          }
+        if (allEngineLinks.length > 0) {
+          console.log(`[INFO] Total ${allEngineLinks.length} results from all engines for ${industry} site:${tld.substring(1)}`);
+          tldSuccess = true;
+          break; // Exit proxy retry loop - success
         }
 
-        console.log(`[INFO] Total ${allEngineLinks.length} results from all engines for ${industry} site:${tld.substring(1)}`);
+        // All engines returned 0 or were blocked
+        if (currentProxy) {
+          // Proxy was being used and failed - mark it and try next proxy
+          markProxyFailed(currentProxy);
+          proxyAttempts++;
+          currentProxy = getNextProxy();
+          if (currentProxy) {
+            console.log(`[INFO] All engines failed with proxy ${currentProxy}, switching to next proxy...`);
+            continue; // retry TLD with next proxy
+          } else {
+            console.log(`[INFO] All proxies exhausted for ${industry} site:${tld.substring(1)}`);
+            break; // exit proxy retry loop
+          }
+        } else {
+          // Direct connection failed - try proxies
+          proxyAttempts++;
+          currentProxy = getNextProxy();
+          if (currentProxy) {
+            console.log(`[INFO] Direct connection failed for ${industry} site:${tld.substring(1)}, trying proxy: ${currentProxy}`);
+            continue; // retry TLD with proxy
+          } else {
+            console.log(`[INFO] No proxies available for ${industry} site:${tld.substring(1)}, skipping TLD`);
+            break; // exit proxy retry loop
+        }
+
+      } // close try block for engine loop
+
+      } catch (error) {
+        const msg = error.message || String(error);
+        const isDisconnect = msg.includes('Connection closed') || msg.includes('browser has disconnected') || msg.includes('Protocol error');
+        const isTimeout = msg.includes('timeout') || msg.includes('TimedOut') || msg.includes('ERR_TIMED_OUT') || msg.includes('ERR_CONNECTION_TIMED_OUT');
+        console.error(`Attempt ${proxyAttempts + 1}/${maxProxyAttempts + 1} failed for TLD ${tld}: ${msg}${isDisconnect ? ' (browser disconnect)' : ''}${isTimeout ? ' (timeout)' : ''}`);
+        if (currentProxy) {
+          markProxyFailed(currentProxy);
+        }
+        proxyAttempts++;
+        currentProxy = getNextProxy();
+        if (!currentProxy) {
+          console.error(`Giving up on TLD ${tld} after exhausting all proxies.`);
+          break;
+        }
+      }
+
+      // If tldSuccess, process the collected links
+      if (tldSuccess && allEngineLinks.length > 0) {
+        // Filter out excluded domains and useless sites from engine results
+        const filteredLinks = allEngineLinks.filter(link => {
+          try {
+            const url = new URL(link);
+            const host = url.hostname.toLowerCase();
+            const linkLower = link.toLowerCase();
+            const path = url.pathname.toLowerCase();
+
+            // Exclude search engine domains themselves
+            if (excludedDomainsLower.some(d => host.includes(d) || host === d)) {
+              return false;
+            }
+
+            // Exclude subdomains of search engines and useless sites
+            if (excludedDomainsLower.some(d => host.endsWith('.' + d.replace('.', '\\.')))) {
+              return false;
+            }
+
+            // Exclude Bing redirect/click tracking links
+            if (linkLower.includes('/ck/a?') || linkLower.includes('bing.com/ck/a')) {
+              return false;
+            }
+
+            // Exclude google translate and similar redirect services
+            if (linkLower.includes('translate.google.com/translate') ||
+                linkLower.includes('google.com/url') ||
+                linkLower.includes('webcache.googleusercontent.com')) {
+              return false;
+            }
+
+            // Exclude rubbish path patterns (directories, aggregators, listings, etc.)
+            if (RUBBISH_PATH_PATTERNS.some(pat => path.includes(pat))) {
+              return false;
+            }
+
+            // Exclude URLs with query parameters that look like search/tracking
+            const searchParams = url.search.toLowerCase();
+            if (searchParams.includes('utm_source') || searchParams.includes('utm_medium') ||
+                searchParams.includes('utm_campaign') || searchParams.includes('fbclid') ||
+                searchParams.includes('gclid') || searchParams.includes('ref=') ||
+                searchParams.includes('source=') || searchParams.includes('medium=')) {
+              return false;
+            }
+
+            // Exclude very short paths that are likely search results pages
+            if (path === '/' || path === '/index' || path === '/index.html' || path === '/home') {
+              return false;
+            }
+
+            const hasIrrelevantKeyword = CONFIG.irrelevantKeywords.some(keyword => linkLower.includes(keyword));
+            return !hasIrrelevantKeyword;
+          } catch (error) {
+            return false;
+          }
+        });
+
+        filteredLinks.forEach(link => allLinks.add(link));
+      }
+
+      // Delay between TLD searches to avoid rate limiting
+      await wait(randomInt(2000, 5000));
+    }
 
 // Search engines and useless sites to exclude from results
 const EXCLUDED_DOMAINS = [
@@ -1944,32 +2281,13 @@ const filteredLinks = allEngineLinks.filter(link => {
     return false;
   }
 });
-
-tldLinks = filteredLinks;
-      tldSuccess = true;
-      break; // Success, exit retry loop
-    } catch (error) {
-      const msg = error.message || String(error);
-      const isDisconnect = msg.includes('Connection closed') || msg.includes('browser has disconnected') || msg.includes('Protocol error');
-      const isTimeout = msg.includes('timeout') || msg.includes('TimedOut') || msg.includes('ERR_TIMED_OUT') || msg.includes('ERR_CONNECTION_TIMED_OUT');
-      console.error(`Attempt ${attempt}/${maxTldRetries} failed for TLD ${tld}: ${msg}${isDisconnect ? ' (browser disconnect)' : ''}${isTimeout ? ' (timeout)' : ''}`);
-      if (attempt < maxTldRetries) {
-        await wait(3000); // wait before retry
-      } else {
-        console.error(`Giving up on TLD ${tld} after ${maxTldRetries} attempts.`);
-      }
-    }
-
-    if (tldSuccess) break;
   }
-
-  tldLinks.forEach(link => allLinks.add(link));
 
   // Delay between TLD searches to avoid rate limiting
   await wait(randomInt(2000, 5000));
 }
-  return [...allLinks];
-}
+
+return [...allLinks];
 
 
 async function extractEmailsFromWebsite(url, browser) {
@@ -2621,6 +2939,9 @@ async function main(io) {
   if (!emailQueueProcessorInterval) {
     emailQueueProcessorInterval = setInterval(emailQueueProcessor, 2 * 60 * 1000); // Run every 2 minutes
   }
+
+  // Fetch fresh proxies from Proxyscrape API
+  await fetchProxiesFromAPI();
 
   const shuffledIndustries = shuffleArray([...CONFIG.industries]);
 
