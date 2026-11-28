@@ -18,6 +18,8 @@ const PROTOCOL_TIMEOUT_MS = 180000; // 3 minutes for container environments
 
 // Proxy support with rotation — Proxyscrape API + static list
 const PROXY_API_KEY = process.env.PROXY_API_KEY || 'HVIsHemQvnWDqumZo9707iGXo0VpmypJaj4S51RiLUHMBtuYS1cpGcHQFSgTrshR';
+const CAPTCHA_SERVICE = process.env.CAPTCHA_SERVICE || '2captcha';
+const CAPTCHA_API_KEY = process.env.CAPTCHA_API_KEY || '';
 const PROXY_API_URL = `https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=ip:port&format=text&timeout=10000&api_key=${PROXY_API_KEY}`;
 
 // Static proxy list (from spys.one) — if one fails, moves to next
@@ -302,6 +304,74 @@ function getLaunchArgs(proxy = null) {
     args.unshift(`--proxy-server=http://${proxy}`);
   }
   return args;
+}
+
+// 2Captcha solving integration
+const TWOCAPTCHA_IN_URL = 'http://2captcha.com/in.php';
+const TWOCAPTCHA_RES_URL = 'http://2captcha.com/res.php';
+
+async function submitCaptchaTo2captcha(sitekey, pageUrl) {
+  if (!CAPTCHA_API_KEY) return null;
+  const formData = new URLSearchParams();
+  formData.append('method', 'userrecaptcha');
+  formData.append('googlekey', sitekey);
+  formData.append('pageurl', pageUrl);
+  formData.append('key', CAPTCHA_API_KEY);
+  formData.append('json', '1');
+  try {
+    const resp = await fetch(TWOCAPTCHA_IN_URL, { method: 'POST', body: formData });
+    const data = await resp.json();
+    if (data.status === 1) return data.request;
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function getCaptchaResultFrom2captcha(captchaId, maxWaitMs = 120000) {
+  if (!CAPTCHA_API_KEY || !captchaId) return null;
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    await wait(5000);
+    try {
+      const url = `${TWOCAPTCHA_RES_URL}?key=${CAPTCHA_API_KEY}&action=get&id=${captchaId}&json=1`;
+      const resp = await fetch(url);
+      const data = await resp.json();
+      if (data.status === 1) return data.request;
+      if (data.request === 'CAPCHA_NOT_READY' || data.request === 'ERROR_NO_SUCH_CAPCHA_ID') continue;
+      return null;
+    } catch (e) {
+      return null;
+    }
+  }
+  return null;
+}
+
+async function solveRecaptcha(page) {
+  if (!CAPTCHA_API_KEY) return false;
+  const sitekey = await page.evaluate(() => {
+    const el = document.querySelector('[data-sitekey]');
+    return el ? el.getAttribute('data-sitekey') : null;
+  });
+  if (!sitekey) return false;
+  const pageUrl = page.url();
+  const captchaId = await submitCaptchaTo2captcha(sitekey, pageUrl);
+  if (!captchaId) return false;
+  const token = await getCaptchaResultFrom2captcha(captchaId);
+  if (!token) return false;
+  try {
+    await page.evaluate((token) => {
+      const textarea = document.querySelector('textarea#g-recaptcha-response');
+      if (textarea) textarea.innerHTML = token;
+      const cbEl = document.querySelector('[data-callback]');
+      if (cbEl && cbEl.getAttribute('data-callback') && window[cbEl.getAttribute('data-callback')]) {
+        window[cbEl.getAttribute('data-callback')](token);
+      }
+    }, token);
+  } catch (e) {
+    return false;
+  }
+  return true;
 }
 
 // User agent rotation to reduce bot detection
@@ -1789,33 +1859,11 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
   }
 
     for (const tld of tldsToSearch) {
-    let tldLinks = [];
-    let tldSuccess = false;
+        let tldSuccess = false;
+        let allEngineLinks = [];
+        let engineBrowser = null;
 
-    // Try direct connection first, then rotate through proxies if all engines fail
-    let proxyAttempts = 0;
-    const maxProxyAttempts = Math.min(proxyList.length, 10); // Try up to 10 proxies per TLD
-    let currentProxy = null; // null = direct connection
-
-    while (!tldSuccess && proxyAttempts <= maxProxyAttempts) {
-      // If we have a proxy, close current browser and relaunch with it
-      if (currentProxy) {
-        try {
-          await browser.close();
-        } catch (e) {
-          // ignore close errors
-        }
-        console.log(`[INFO] Relaunching browser with proxy: ${currentProxy}`);
-        browser = await puppeteer.launch({
-          headless: "new",
-          ignoreHTTPSErrors: true,
-          args: getLaunchArgs(currentProxy),
-          protocolTimeout: PROTOCOL_TIMEOUT_MS,
-        });
-      }
-
-      try {
-        // Loop over ALL search engines (20+) for each TLD, collect results from all working engines
+        // Rotate proxy per engine request
         const engines = [
           {
             name: 'ddg-html',
@@ -1990,12 +2038,20 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
           }
         ];
 
-        let allEngineLinks = [];
-
+        // Rotate proxy per engine request
         for (const eng of engines) {
-          let engPage;
+          if (tldSuccess) break;
+
+          const proxy = getNextProxy();
           try {
-            engPage = await browser.newPage();
+            engineBrowser = await puppeteer.launch({
+              headless: "new",
+              ignoreHTTPSErrors: true,
+              args: getLaunchArgs(proxy),
+              protocolTimeout: PROTOCOL_TIMEOUT_MS,
+            });
+
+            const engPage = await engineBrowser.newPage();
             await engPage.evaluateOnNewDocument(() => {
               Object.defineProperty(navigator, 'webdriver', {
                 get: () => false,
@@ -2018,13 +2074,27 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
             });
             await engPage.setViewport({ width: 1366, height: 768 });
 
-            console.log(`[INFO] Searching ${eng.name} for ${industry} site:${tld.substring(1)}`);
+            console.log(`[INFO] Searching ${eng.name} for ${industry} site:${tld.substring(1)} via proxy ${proxy || 'direct'}`);
             await engPage.goto(eng.url, { waitUntil: 'networkidle2', timeout: PROTOCOL_TIMEOUT_MS });
-            const pageContent = await engPage.content();
-            const isBlocked = /No results found|captcha|unusual traffic|verify you are|robot|automated|access denied|blocked|unusual activity/i.test(pageContent);
+            let pageContent = await engPage.content();
+            let isBlocked = /No results found|captcha|unusual traffic|verify you are|robot|automated|access denied|blocked|unusual activity/i.test(pageContent);
+
+            if (isBlocked && CAPTCHA_API_KEY) {
+              console.log(`[INFO] ${eng.name} captcha detected, attempting to solve...`);
+              const solved = await solveRecaptcha(engPage);
+              if (solved) {
+                await wait(randomInt(3000, 6000));
+                pageContent = await engPage.content();
+                isBlocked = /No results found|captcha|unusual traffic|verify you are|robot|automated|access denied|blocked|unusual activity/i.test(pageContent);
+              }
+            }
+
             if (isBlocked) {
               console.log(`[INFO] ${eng.name} appears blocked/captcha for ${industry} site:${tld.substring(1)}, skipping engine`);
               try { if (!engPage.isClosed()) await engPage.close(); } catch (e) {}
+              try { await engineBrowser.close(); } catch (e) {}
+              engineBrowser = null;
+              await wait(randomInt(2000, 5000));
               continue;
             }
             const engLinks = await engPage.$$eval(eng.selector, anchors =>
@@ -2038,70 +2108,35 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
               console.log(`[INFO] ${eng.name} returned 0 results for ${industry} site:${tld.substring(1)}`);
             }
             try { if (!engPage.isClosed()) await engPage.close(); } catch (e) {}
+            try { await engineBrowser.close(); } catch (e) {}
+            engineBrowser = null;
           } catch (err) {
             console.log(`[INFO] ${eng.name} failed for ${industry} site:${tld.substring(1)}: ${err.message}, skipping engine`);
             try { if (engPage && !engPage.isClosed()) await engPage.close(); } catch (e) {}
             // If using a proxy and it fails, mark it as failed
-            if (currentProxy && err.message && (err.message.includes('ERR_CONNECTION') || err.message.includes('timeout') || err.message.includes('Protocol error') || err.message.includes('Session closed'))) {
-              markProxyFailed(currentProxy);
+            if (proxy && err.message && (err.message.includes('ERR_CONNECTION') || err.message.includes('timeout') || err.message.includes('Protocol error') || err.message.includes('Session closed'))) {
+              markProxyFailed(proxy);
             }
+            try { await engineBrowser.close(); } catch (e) {}
+            engineBrowser = null;
             continue;
           }
-          // Longer delay between engines to reduce captcha triggering
+          // Delay between engines to reduce rate limiting and captcha triggering
           await wait(randomInt(3000, 8000));
+        }
+
+        if (engineBrowser) {
+          try { await engineBrowser.close(); } catch (e) {}
+          engineBrowser = null;
         }
 
         if (allEngineLinks.length > 0) {
           console.log(`[INFO] Total ${allEngineLinks.length} results from all engines for ${industry} site:${tld.substring(1)}`);
           tldSuccess = true;
-          break; // Exit proxy retry loop - success
         }
 
-        // All engines returned 0 or were blocked
-        if (currentProxy) {
-          // Proxy was being used and failed - mark it and try next proxy
-          markProxyFailed(currentProxy);
-          proxyAttempts++;
-          currentProxy = getNextProxy();
-          if (currentProxy) {
-            console.log(`[INFO] All engines failed with proxy ${currentProxy}, switching to next proxy...`);
-            continue; // retry TLD with next proxy
-          } else {
-            console.log(`[INFO] All proxies exhausted for ${industry} site:${tld.substring(1)}`);
-            break; // exit proxy retry loop
-          }
-        } else {
-          // Direct connection failed - try proxies
-          proxyAttempts++;
-          currentProxy = getNextProxy();
-          if (currentProxy) {
-            console.log(`[INFO] Direct connection failed for ${industry} site:${tld.substring(1)}, trying proxy: ${currentProxy}`);
-            continue; // retry TLD with proxy
-          } else {
-            console.log(`[INFO] No proxies available for ${industry} site:${tld.substring(1)}, skipping TLD`);
-            break; // exit proxy retry loop
-        }
-
-      } // close try block for engine loop
-
-      } catch (error) {
-        const msg = error.message || String(error);
-        const isDisconnect = msg.includes('Connection closed') || msg.includes('browser has disconnected') || msg.includes('Protocol error');
-        const isTimeout = msg.includes('timeout') || msg.includes('TimedOut') || msg.includes('ERR_TIMED_OUT') || msg.includes('ERR_CONNECTION_TIMED_OUT');
-        console.error(`Attempt ${proxyAttempts + 1}/${maxProxyAttempts + 1} failed for TLD ${tld}: ${msg}${isDisconnect ? ' (browser disconnect)' : ''}${isTimeout ? ' (timeout)' : ''}`);
-        if (currentProxy) {
-          markProxyFailed(currentProxy);
-        }
-        proxyAttempts++;
-        currentProxy = getNextProxy();
-        if (!currentProxy) {
-          console.error(`Giving up on TLD ${tld} after exhausting all proxies.`);
-          break;
-        }
-      }
-
-      // If tldSuccess, process the collected links
-      if (tldSuccess && allEngineLinks.length > 0) {
+        // If tldSuccess, process the collected links
+        if (tldSuccess && allEngineLinks.length > 0) {
         // Filter out excluded domains and useless sites from engine results
         const filteredLinks = allEngineLinks.filter(link => {
           try {
@@ -2164,6 +2199,7 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
       // Delay between TLD searches to avoid rate limiting
       await wait(randomInt(2000, 5000));
     }
+  }
 
 // Search engines and useless sites to exclude from results
 const EXCLUDED_DOMAINS = [
@@ -2226,67 +2262,7 @@ const RUBBISH_PATH_PATTERNS = [
   '/rss', '/feed', '/xml', '/api/', '/wp-json', '/feed/'
 ];
 
-// Filter out excluded domains and useless sites from engine results
-const filteredLinks = allEngineLinks.filter(link => {
-  try {
-    const url = new URL(link);
-    const host = url.hostname.toLowerCase();
-    const linkLower = link.toLowerCase();
-    const path = url.pathname.toLowerCase();
-
-    // Exclude search engine domains themselves
-    if (excludedDomainsLower.some(d => host.includes(d) || host === d)) {
-      return false;
-    }
-
-    // Exclude subdomains of search engines and useless sites
-    if (excludedDomainsLower.some(d => host.endsWith('.' + d.replace('.', '\\.')))) {
-      return false;
-    }
-
-    // Exclude Bing redirect/click tracking links
-    if (linkLower.includes('/ck/a?') || linkLower.includes('bing.com/ck/a')) {
-      return false;
-    }
-
-    // Exclude google translate and similar redirect services
-    if (linkLower.includes('translate.google.com/translate') ||
-        linkLower.includes('google.com/url') ||
-        linkLower.includes('webcache.googleusercontent.com')) {
-      return false;
-    }
-
-    // Exclude rubbish path patterns (directories, aggregators, listings, etc.)
-    if (RUBBISH_PATH_PATTERNS.some(pat => path.includes(pat))) {
-      return false;
-    }
-
-    // Exclude URLs with query parameters that look like search/tracking
-    const searchParams = url.search.toLowerCase();
-    if (searchParams.includes('utm_source') || searchParams.includes('utm_medium') ||
-        searchParams.includes('utm_campaign') || searchParams.includes('fbclid') ||
-        searchParams.includes('gclid') || searchParams.includes('ref=') ||
-        searchParams.includes('source=') || searchParams.includes('medium=')) {
-      return false;
-    }
-
-    // Exclude very short paths that are likely search results pages
-    if (path === '/' || path === '/index' || path === '/index.html' || path === '/home') {
-      return false;
-    }
-
-    const hasIrrelevantKeyword = CONFIG.irrelevantKeywords.some(keyword => linkLower.includes(keyword));
-    return !hasIrrelevantKeyword;
-  } catch (error) {
-    return false;
-  }
-});
-  }
-
-  // Delay between TLD searches to avoid rate limiting
-  await wait(randomInt(2000, 5000));
-  return [...allLinks];
-}
+// Low-quality URL path patterns that indicate directory/aggregator/rubbish sites
 
 
 async function extractEmailsFromWebsite(url, browser) {
