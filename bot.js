@@ -1698,6 +1698,31 @@ async function emailQueueProcessor() {
 // ---------- UTILITY ----------
 const randomInt = (min,max) => Math.floor(Math.random()*(max-min+1))+min;
 const wait = ms => new Promise(r => setTimeout(r, ms));
+
+// Remove stale Chrome SingletonLock files left by crashed runs so puppeteer can launch
+function cleanupBrowserLocks(profileDir) {
+  try {
+    if (!fs.existsSync(profileDir)) return;
+    const entries = fs.readdirSync(profileDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name === 'SingletonLock' || entry.name.endsWith('Lock')) {
+        try { fs.unlinkSync(path.join(profileDir, entry.name)); } catch (e) {}
+      }
+      if (entry.isDirectory()) {
+        try {
+          const sub = fs.readdirSync(path.join(profileDir, entry.name), { withFileTypes: true });
+          for (const s of sub) {
+            if (s.name === 'SingletonLock' || s.name.endsWith('Lock')) {
+              try { fs.unlinkSync(path.join(profileDir, entry.name, s.name)); } catch (e) {}
+            }
+          }
+        } catch (e) {}
+      }
+    }
+  } catch (e) {
+    // ignore cleanup errors
+  }
+}
 function isAllowedTime() {
   return true;
 }
@@ -2070,6 +2095,7 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
             } else {
               console.log(`[INFO] Relaunching browser with direct connection`);
             }
+            cleanupBrowserLocks('./browser_profile');
             browser = await puppeteer.launch({
               headless: "new",
               ignoreHTTPSErrors: true,
@@ -3054,6 +3080,7 @@ async function main(io) {
 
   const shuffledIndustries = shuffleArray([...CONFIG.industries]);
 
+  cleanupBrowserLocks('./browser_profile');
   let browser = await puppeteer.launch({
     headless: "new",
     ignoreHTTPSErrors: true,
