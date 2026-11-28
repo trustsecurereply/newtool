@@ -17,7 +17,7 @@ const DELAY_BETWEEN_BATCHES_MS = 60 * 1000; // 1 minute delay between batches
 const PROTOCOL_TIMEOUT_MS = 180000; // 3 minutes for container environments
 
 // Proxy support with rotation — Proxyscrape API + static list
-const PROXY_API_KEY = 'HVIsHemQvnWDqumZo9707iGXo0VpmypJaj4S51RiLUHMBtuYS1cpGcHQFSgTrshR';
+const PROXY_API_KEY = process.env.PROXY_API_KEY || 'HVIsHemQvnWDqumZo9707iGXo0VpmypJaj4S51RiLUHMBtuYS1cpGcHQFSgTrshR';
 const PROXY_API_URL = `https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=ip:port&format=text&timeout=10000&api_key=${PROXY_API_KEY}`;
 
 // Static proxy list (from spys.one) — if one fails, moves to next
@@ -2285,9 +2285,8 @@ const filteredLinks = allEngineLinks.filter(link => {
 
   // Delay between TLD searches to avoid rate limiting
   await wait(randomInt(2000, 5000));
+  return [...allLinks];
 }
-
-return [...allLinks];
 
 
 async function extractEmailsFromWebsite(url, browser) {
