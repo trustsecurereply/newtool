@@ -1538,98 +1538,256 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
         );
 
         await page.setViewport({ width: 1366, height: 768 });
-        // Alternate between html and lite DuckDuckGo endpoints to avoid IP blocking
-        const useLite = attempt % 2 === 0;
-        let query = `"${industry}" site:${tld.substring(1)}`;
-        let searchUrl;
-        let resultSelector;
-        let engine = 'ddg';
-        if (useLite) {
-          searchUrl = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`;
-          resultSelector = 'a.result-link';
-        } else {
-          searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-          resultSelector = 'a.result__a';
-        }
-        console.log(`[INFO] Searching ${useLite ? 'lite' : 'html'} DDG for ${industry} site:${tld.substring(1)} (attempt ${attempt}/${maxTldRetries})`);
-        await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: PROTOCOL_TIMEOUT_MS });
-
-        // Selector for the active DDG version
-        let links = await page.$$eval(resultSelector, anchors =>
-          anchors.map(a => a.href)
-        );
-
-        // If DDG returned nothing, fall back to Bing
-        if (links.length === 0) {
-          engine = 'bing';
-          const bingQuery = `"${industry}" site:${tld.substring(1)}`;
-          const bingUrl = `https://www.bing.com/search?q=${encodeURIComponent(bingQuery)}`;
-          console.log(`[INFO] DDG returned 0 results, falling back to Bing for ${industry} site:${tld.substring(1)}`);
-          await page.goto(bingUrl, { waitUntil: 'domcontentloaded', timeout: PROTOCOL_TIMEOUT_MS });
-          links = await page.$$eval('li.b_algo h2 a, .b_algo h2 a', anchors =>
-            anchors.map(a => a.href)
-          );
-        }
-
-        // Detect block/captcha/no-results page
-        const pageContent = await page.content();
-        const isBlocked = /No results found|captcha|unusual traffic|verify you are|robot|automated/i.test(pageContent);
-        if (isBlocked && links.length === 0) {
-          console.error(`${engine.toUpperCase()} blocked or returned no results for TLD ${tld} (industry: ${industry}). Consider using a proxy or adding delays.`);
-        }
-
-        if (links.length === 0) {
-          fs.writeFileSync(`debug_${tld}_attempt${attempt}.html`, await page.content());
-        }
-
-        const cleanedLinks = links.map(link => {
-          try {
-            const url = new URL(link);
-            // Ensure it's a valid web URL with a hostname
-            if (!['http:', 'https:'].includes(url.protocol) || !url.hostname) {
-              return null;
-            }
-
-            // The HTML version also uses a redirect with 'uddg' parameter
-            if (url.hostname.includes('duckduckgo.com') && url.searchParams.has('uddg')) {
-              const uddgUrl = url.searchParams.get('uddg');
+        // Loop over ALL search engines (20+) for each TLD, collect results from all working engines
+        const engines = [
+          {
+            name: 'ddg-html',
+            url: `https://html.duckduckgo.com/html/?q=${encodeURIComponent(`"${industry}" site:${tld.substring(1)}`)}`,
+            selector: 'a.result__a',
+            cleanup: (link) => {
               try {
-                const parsedUddgUrl = new URL(uddgUrl);
-                // Validate the extracted uddgUrl before returning
-                if (!['http:', 'https:'].includes(parsedUddgUrl.protocol) || !parsedUddgUrl.hostname) {
-                  return null;
+                const url = new URL(link);
+                if (url.hostname.includes('duckduckgo.com') && url.searchParams.has('uddg')) {
+                  const uddgUrl = url.searchParams.get('uddg');
+                  const parsed = new URL(uddgUrl);
+                  if (['http:', 'https:'].includes(parsed.protocol) && parsed.hostname) {
+                    return uddgUrl;
+                  }
                 }
-                return uddgUrl;
+                return link;
               } catch (e) {
-                return null; // uddgUrl is malformed
-              }
-            }
-
-            // Decode Bing redirect/click tracking links (u= parameter is base64 encoded)
-            if (url.hostname.includes('bing.com') && url.searchParams.has('u')) {
-              const bingRedirect = url.searchParams.get('u');
-              try {
-                // Bing encodes the URL as base64, sometimes with 'a1' prefix
-                let encoded = bingRedirect;
-                if (encoded.startsWith('a1')) {
-                  encoded = encoded.substring(2);
-                }
-                const decoded = Buffer.from(encoded, 'base64').toString('utf-8');
-                const parsedDecoded = new URL(decoded);
-                if (['http:', 'https:'].includes(parsedDecoded.protocol) && parsedDecoded.hostname) {
-                  return decoded;
-                }
-              } catch (e) {
-                // If decoding fails, filter out this bing.com link
                 return null;
               }
             }
-            return link;
-          } catch (e) {
-            // If URL is malformed, return null to filter it out later
-            return null;
+          },
+          {
+            name: 'ddg-lite',
+            url: `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(`"${industry}" site:${tld.substring(1)}`)}`,
+            selector: 'a.result-link',
+            cleanup: (link) => link
+          },
+          {
+            name: 'bing',
+            url: `https://www.bing.com/search?q=${encodeURIComponent(`"${industry}" site:${tld.substring(1)}`)}`,
+            selector: 'li.b_algo h2 a, .b_algo h2 a',
+            cleanup: (link) => {
+              try {
+                const url = new URL(link);
+                if (url.hostname.includes('bing.com') && url.searchParams.has('u')) {
+                  const bingRedirect = url.searchParams.get('u');
+                  let encoded = bingRedirect;
+                  if (encoded.startsWith('a1')) {
+                    encoded = encoded.substring(2);
+                  }
+                  const decoded = Buffer.from(encoded, 'base64').toString('utf-8');
+                  const parsed = new URL(decoded);
+                  if (['http:', 'https:'].includes(parsed.protocol) && parsed.hostname) {
+                    return decoded;
+                  }
+                }
+                return link;
+              } catch (e) {
+                return null;
+              }
+            }
+          },
+          {
+            name: 'brave',
+            url: `https://search.brave.com/search?q=${encodeURIComponent(`"${industry}" site:${tld.substring(1)}`)}&source=web`,
+            selector: '.snippet-title a, .result-header a',
+            cleanup: (link) => link
+          },
+          {
+            name: 'mojeek',
+            url: `https://www.mojeek.com/search?q=${encodeURIComponent(`"${industry}" site:${tld.substring(1)}`)}`,
+            selector: 'results-standard a, .results-standard a',
+            cleanup: (link) => link
+          },
+          {
+            name: 'yandex',
+            url: `https://yandex.com/search/?text=${encodeURIComponent(`"${industry}" site:${tld.substring(1)}`)}`,
+            selector: '.organic__url a, .serp-item__link a',
+            cleanup: (link) => link
+          },
+          {
+            name: 'aol',
+            url: `https://search.aol.com/aol/search?q=${encodeURIComponent(`"${industry}" site:${tld.substring(1)}`)}`,
+            selector: '.algo h3 a, .algo .compTitle a',
+            cleanup: (link) => link
+          },
+          {
+            name: 'ask',
+            url: `https://www.ask.com/web?q=${encodeURIComponent(`"${industry}" site:${tld.substring(1)}`)}`,
+            selector: '.PartialSearchResults-item .result-title a, .PartialSearchResults-item-title a',
+            cleanup: (link) => link
+          },
+          {
+            name: 'lycos',
+            url: `https://search.lycos.com/web/?q=${encodeURIComponent(`"${industry}" site:${tld.substring(1)}`)}`,
+            selector: '.result-title a, .title a',
+            cleanup: (link) => link
+          },
+          {
+            name: 'dogpile',
+            url: `https://www.dogpile.com/serp?q=${encodeURIComponent(`"${industry}" site:${tld.substring(1)}`)}`,
+            selector: '.result__a, .web-result__title-link',
+            cleanup: (link) => link
+          },
+          {
+            name: 'metacrawler',
+            url: `https://www.metacrawler.com/web?q=${encodeURIComponent(`"${industry}" site:${tld.substring(1)}`)}`,
+            selector: '.result__a, .title-link',
+            cleanup: (link) => link
+          },
+          {
+            name: 'startpage',
+            url: `https://www.startpage.com/sp/search?query=${encodeURIComponent(`"${industry}" site:${tld.substring(1)}`)}`,
+            selector: '.w-gl__result-title a, .result-title a',
+            cleanup: (link) => link
+          },
+          {
+            name: 'swisscows',
+            url: `https://swisscows.com/en/web?query=${encodeURIComponent(`"${industry}" site:${tld.substring(1)}`)}`,
+            selector: '.result__title a, .result-title a',
+            cleanup: (link) => link
+          },
+          {
+            name: 'qwant',
+            url: `https://www.qwant.com/?q=${encodeURIComponent(`"${industry}" site:${tld.substring(1)}`)}&t=web`,
+            selector: '.web-result__title a, .result__title a',
+            cleanup: (link) => link
+          },
+          {
+            name: 'ecosia',
+            url: `https://www.ecosia.org/search?q=${encodeURIComponent(`"${industry}" site:${tld.substring(1)}`)}`,
+            selector: '.result__title a, .result-title a',
+            cleanup: (link) => link
+          },
+          {
+            name: 'yep',
+            url: `https://yep.com/web?q=${encodeURIComponent(`"${industry}" site:${tld.substring(1)}`)}`,
+            selector: '.result__title a, .result-title a',
+            cleanup: (link) => link
+          },
+          {
+            name: 'gibiru',
+            url: `https://gibiru.com/search?q=${encodeURIComponent(`"${industry}" site:${tld.substring(1)}`)}`,
+            selector: '.result-title a, .title a',
+            cleanup: (link) => link
+          },
+          {
+            name: 'searx',
+            url: `https://searx.be/search?q=${encodeURIComponent(`"${industry}" site:${tld.substring(1)}`)}&categories=web`,
+            selector: '.result__title a, .result-title a',
+            cleanup: (link) => link
+          },
+          {
+            name: 'searx2',
+            url: `https://searx.tiekoetter.com/search?q=${encodeURIComponent(`"${industry}" site:${tld.substring(1)}`)}&categories=web`,
+            selector: '.result__title a, .result-title a',
+            cleanup: (link) => link
+          },
+          {
+            name: 'marginalia',
+            url: `https://search.marginalia.nu/search?query=${encodeURIComponent(`"${industry}" site:${tld.substring(1)}`)}`,
+            selector: '.result a, .search-result a',
+            cleanup: (link) => link
+          },
+          {
+            name: 'kagi',
+            url: `https://kagi.com/search?q=${encodeURIComponent(`"${industry}" site:${tld.substring(1)}`)}`,
+            selector: '.result__title a, .result-title a',
+            cleanup: (link) => link
+          },
+          {
+            name: 'gigablast',
+            url: `https://www.gigablast.com/search?q=${encodeURIComponent(`"${industry}" site:${tld.substring(1)}`)}`,
+            selector: '.b_title a, .title a',
+            cleanup: (link) => link
+          },
+          {
+            name: 'exalead',
+            url: `https://www.exalead.com/search/web/results/?q=${encodeURIComponent(`"${industry}" site:${tld.substring(1)}`)}`,
+            selector: '.result-title a, .title a',
+            cleanup: (link) => link
           }
-        }).filter(link => link !== null); // Filter out nulls (malformed URLs)
+        ];
+
+        let allEngineLinks = [];
+
+        for (const eng of engines) {
+          try {
+            console.log(`[INFO] Searching ${eng.name} for ${industry} site:${tld.substring(1)}`);
+            await page.goto(eng.url, { waitUntil: 'domcontentloaded', timeout: PROTOCOL_TIMEOUT_MS });
+            const pageContent = await page.content();
+            const isBlocked = /No results found|captcha|unusual traffic|verify you are|robot|automated|access denied|blocked/i.test(pageContent);
+            if (isBlocked) {
+              console.log(`[INFO] ${eng.name} appears blocked/captcha for ${industry} site:${tld.substring(1)}, skipping engine`);
+              continue;
+            }
+            const engLinks = await page.$$eval(eng.selector, anchors =>
+              anchors.map(a => a.href).filter(h => h && h.startsWith('http'))
+            );
+            const cleaned = engLinks.map(eng.cleanup).filter(l => l !== null);
+            if (cleaned.length > 0) {
+              console.log(`[INFO] ${eng.name} returned ${cleaned.length} results for ${industry} site:${tld.substring(1)}`);
+              allEngineLinks.push(...cleaned);
+            } else {
+              console.log(`[INFO] ${eng.name} returned 0 results for ${industry} site:${tld.substring(1)}`);
+            }
+          } catch (err) {
+            console.log(`[INFO] ${eng.name} failed for ${industry} site:${tld.substring(1)}: ${err.message}, skipping engine`);
+            continue;
+          }
+        }
+
+        if (allEngineLinks.length === 0) {
+          console.log(`[INFO] All search engines returned 0 results for ${industry} site:${tld.substring(1)}, trying Common Crawl fallback...`);
+          // Common Crawl CDX API fallback — no search engine needed
+          try {
+            const ccIndex = 'CC-MAIN-2024-10';
+            const ccUrl = `https://index.commoncrawl.org/${ccIndex}-index?url=*.${tld.substring(1)}&output=json&filter=status:200&filter=mime:text/html&collapse=urlkey&limit=50`;
+            console.log(`[INFO] Querying Common Crawl for *.${tld.substring(1)}...`);
+            const ccResponse = await fetch(ccUrl, { signal: AbortSignal.timeout(30000) });
+            if (ccResponse.ok) {
+              const ccText = await ccResponse.text();
+              const ccLines = ccText.trim().split('\n').filter(Boolean);
+              const ccDomains = new Set();
+              for (const line of ccLines) {
+                try {
+                  const record = JSON.parse(line);
+                  const url = record.url;
+                  const parsed = new URL(url);
+                  const host = parsed.hostname.toLowerCase();
+                  // Filter out subdomains like www, blog, etc. - keep root domains
+                  const parts = host.split('.');
+                  if (parts.length >= 2) {
+                    const rootDomain = parts.slice(-2).join('.');
+                    ccDomains.add(`https://${rootDomain}/`);
+                  }
+                } catch (e) {
+                  // skip malformed lines
+                }
+              }
+              if (ccDomains.size > 0) {
+                console.log(`[INFO] Common Crawl returned ${ccDomains.size} domains for *.${tld.substring(1)}`);
+                allEngineLinks.push(...Array.from(ccDomains));
+              } else {
+                console.log(`[INFO] Common Crawl returned 0 domains for *.${tld.substring(1)}`);
+              }
+            } else {
+              console.log(`[INFO] Common Crawl request failed: ${ccResponse.status}`);
+            }
+          } catch (e) {
+            console.log(`[INFO] Common Crawl fallback failed: ${e.message}`);
+          }
+          if (allEngineLinks.length === 0) {
+            console.log(`[INFO] No results from any source for ${industry} site:${tld.substring(1)}, skipping TLD`);
+            continue; // try next TLD
+          }
+        }
+
+        console.log(`[INFO] Total ${allEngineLinks.length} results from all engines for ${industry} site:${tld.substring(1)}`);
 
 // Search engines and useless sites to exclude from results
 const EXCLUDED_DOMAINS = [
@@ -1672,11 +1830,33 @@ const EXCLUDED_DOMAINS = [
 
 const excludedDomainsLower = EXCLUDED_DOMAINS.map(d => d.toLowerCase());
 
-const filteredLinks = cleanedLinks.filter(link => {
+// Low-quality URL path patterns that indicate directory/aggregator/rubbish sites
+const RUBBISH_PATH_PATTERNS = [
+  '/directory', '/directories', '/listing', '/listings', '/browse', '/search',
+  '/find', '/category', '/categories', '/tag', '/tags', '/page/', '/p/',
+  '/results', '/result', '/query', '/q=', '/search?', '/find?',
+  '/companies/', '/business/', '/businesses/', '/firms/', '/vendors/',
+  '/suppliers/', '/providers/', '/professionals/', '/experts/',
+  '/near-me', '/nearby', '/local/', '/top-', '/best-', '/list-of',
+  '/all-', '/view-all', '/see-all', '/show-all', '/display-all',
+  '/compare', '/review', '/reviews', '/rating', '/ratings',
+  '/claim-your', '/add-your', '/submit-your', '/register-your',
+  '/free-listing', '/paid-listing', '/premium-listing', '/featured',
+  '/sponsored', '/advertise', '/ads/', '/promo', '/coupon',
+  '/deal', '/deals', '/offer', '/offers', '/discount', '/sale',
+  '/jobs/', '/careers/', '/hire', '/hiring', '/recruit',
+  '/press/', '/news/', '/blog/', '/article', '/articles',
+  '/about-us', '/contact-us', '/privacy', '/terms', '/sitemap',
+  '/rss', '/feed', '/xml', '/api/', '/wp-json', '/feed/'
+];
+
+// Filter out excluded domains and useless sites from engine results
+const filteredLinks = allEngineLinks.filter(link => {
   try {
     const url = new URL(link);
     const host = url.hostname.toLowerCase();
     const linkLower = link.toLowerCase();
+    const path = url.pathname.toLowerCase();
 
     // Exclude search engine domains themselves
     if (excludedDomainsLower.some(d => host.includes(d) || host === d)) {
@@ -1700,6 +1880,25 @@ const filteredLinks = cleanedLinks.filter(link => {
       return false;
     }
 
+    // Exclude rubbish path patterns (directories, aggregators, listings, etc.)
+    if (RUBBISH_PATH_PATTERNS.some(pat => path.includes(pat))) {
+      return false;
+    }
+
+    // Exclude URLs with query parameters that look like search/tracking
+    const searchParams = url.search.toLowerCase();
+    if (searchParams.includes('utm_source') || searchParams.includes('utm_medium') ||
+        searchParams.includes('utm_campaign') || searchParams.includes('fbclid') ||
+        searchParams.includes('gclid') || searchParams.includes('ref=') ||
+        searchParams.includes('source=') || searchParams.includes('medium=')) {
+      return false;
+    }
+
+    // Exclude very short paths that are likely search results pages
+    if (path === '/' || path === '/index' || path === '/index.html' || path === '/home') {
+      return false;
+    }
+
     const hasIrrelevantKeyword = CONFIG.irrelevantKeywords.some(keyword => linkLower.includes(keyword));
     return !hasIrrelevantKeyword;
   } catch (error) {
@@ -1707,9 +1906,9 @@ const filteredLinks = cleanedLinks.filter(link => {
   }
 });
 
-        tldLinks = filteredLinks;
-        tldSuccess = true;
-        break; // Success, exit retry loop
+tldLinks = filteredLinks;
+tldSuccess = true;
+break; // Success, exit retry loop
       } catch (error) {
         const msg = error.message || String(error);
         const isDisconnect = msg.includes('Connection closed') || msg.includes('browser has disconnected') || msg.includes('Protocol error');
