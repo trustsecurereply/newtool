@@ -1516,28 +1516,14 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
     console.log(`Searching global TLDs: ${tldsToSearch.join(', ')}`);
   }
 
-  for (const tld of tldsToSearch) {
+    for (const tld of tldsToSearch) {
     let tldLinks = [];
     const maxTldRetries = 3;
 
     for (let attempt = 1; attempt <= maxTldRetries; attempt++) {
-      let page;
       let tldSuccess = false;
 
       try {
-        page = await browser.newPage();
-
-        await page.evaluateOnNewDocument(() => {
-          Object.defineProperty(navigator, 'webdriver', {
-            get: () => false,
-          });
-        });
-
-        await page.setUserAgent(
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'
-        );
-
-        await page.setViewport({ width: 1366, height: 768 });
         // Loop over ALL search engines (20+) for each TLD, collect results from all working engines
         const engines = [
           {
@@ -1716,16 +1702,29 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
         let allEngineLinks = [];
 
         for (const eng of engines) {
+          let engPage;
           try {
+            engPage = await browser.newPage();
+            await engPage.evaluateOnNewDocument(() => {
+              Object.defineProperty(navigator, 'webdriver', {
+                get: () => false,
+              });
+            });
+            await engPage.setUserAgent(
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'
+            );
+            await engPage.setViewport({ width: 1366, height: 768 });
+
             console.log(`[INFO] Searching ${eng.name} for ${industry} site:${tld.substring(1)}`);
-            await page.goto(eng.url, { waitUntil: 'domcontentloaded', timeout: PROTOCOL_TIMEOUT_MS });
-            const pageContent = await page.content();
+            await engPage.goto(eng.url, { waitUntil: 'domcontentloaded', timeout: PROTOCOL_TIMEOUT_MS });
+            const pageContent = await engPage.content();
             const isBlocked = /No results found|captcha|unusual traffic|verify you are|robot|automated|access denied|blocked/i.test(pageContent);
             if (isBlocked) {
               console.log(`[INFO] ${eng.name} appears blocked/captcha for ${industry} site:${tld.substring(1)}, skipping engine`);
+              try { if (!engPage.isClosed()) await engPage.close(); } catch (e) {}
               continue;
             }
-            const engLinks = await page.$$eval(eng.selector, anchors =>
+            const engLinks = await engPage.$$eval(eng.selector, anchors =>
               anchors.map(a => a.href).filter(h => h && h.startsWith('http'))
             );
             const cleaned = engLinks.map(eng.cleanup).filter(l => l !== null);
@@ -1735,10 +1734,14 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
             } else {
               console.log(`[INFO] ${eng.name} returned 0 results for ${industry} site:${tld.substring(1)}`);
             }
+            try { if (!engPage.isClosed()) await engPage.close(); } catch (e) {}
           } catch (err) {
             console.log(`[INFO] ${eng.name} failed for ${industry} site:${tld.substring(1)}: ${err.message}, skipping engine`);
+            try { if (engPage && !engPage.isClosed()) await engPage.close(); } catch (e) {}
             continue;
           }
+          // Small delay between engines to avoid overwhelming the browser
+          await wait(1000);
         }
 
         if (allEngineLinks.length === 0) {
@@ -1759,7 +1762,6 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
                   const url = record.url;
                   const parsed = new URL(url);
                   const host = parsed.hostname.toLowerCase();
-                  // Filter out subdomains like www, blog, etc. - keep root domains
                   const parts = host.split('.');
                   if (parts.length >= 2) {
                     const rootDomain = parts.slice(-2).join('.');
@@ -1907,38 +1909,28 @@ const filteredLinks = allEngineLinks.filter(link => {
 });
 
 tldLinks = filteredLinks;
-tldSuccess = true;
-break; // Success, exit retry loop
-      } catch (error) {
-        const msg = error.message || String(error);
-        const isDisconnect = msg.includes('Connection closed') || msg.includes('browser has disconnected') || msg.includes('Protocol error');
-        const isTimeout = msg.includes('timeout') || msg.includes('TimedOut') || msg.includes('ERR_TIMED_OUT') || msg.includes('ERR_CONNECTION_TIMED_OUT');
-        console.error(`Attempt ${attempt}/${maxTldRetries} failed for TLD ${tld}: ${msg}${isDisconnect ? ' (browser disconnect)' : ''}${isTimeout ? ' (timeout)' : ''}`);
-        if (attempt < maxTldRetries) {
-          await wait(3000); // wait before retry
-        } else {
-          console.error(`Giving up on TLD ${tld} after ${maxTldRetries} attempts.`);
-        }
-      } finally {
-        if (page) {
-          try {
-            if (!page.isClosed()) {
-              await page.close();
-            }
-          } catch (e) {
-            // page already closed / disconnected, ignore
-          }
-        }
+      tldSuccess = true;
+      break; // Success, exit retry loop
+    } catch (error) {
+      const msg = error.message || String(error);
+      const isDisconnect = msg.includes('Connection closed') || msg.includes('browser has disconnected') || msg.includes('Protocol error');
+      const isTimeout = msg.includes('timeout') || msg.includes('TimedOut') || msg.includes('ERR_TIMED_OUT') || msg.includes('ERR_CONNECTION_TIMED_OUT');
+      console.error(`Attempt ${attempt}/${maxTldRetries} failed for TLD ${tld}: ${msg}${isDisconnect ? ' (browser disconnect)' : ''}${isTimeout ? ' (timeout)' : ''}`);
+      if (attempt < maxTldRetries) {
+        await wait(3000); // wait before retry
+      } else {
+        console.error(`Giving up on TLD ${tld} after ${maxTldRetries} attempts.`);
       }
-
-      if (tldSuccess) break;
     }
 
-    tldLinks.forEach(link => allLinks.add(link));
-
-    // Delay between TLD searches to avoid DuckDuckGo rate limiting
-    await wait(randomInt(2000, 5000));
+    if (tldSuccess) break;
   }
+
+  tldLinks.forEach(link => allLinks.add(link));
+
+  // Delay between TLD searches to avoid rate limiting
+  await wait(randomInt(2000, 5000));
+}
   return [...allLinks];
 }
 
