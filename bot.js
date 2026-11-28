@@ -14,7 +14,7 @@ let currentIndustryIndex = 0;
 let currentCountryCodeIndex = 0;
 const COUNTRY_CODE_BATCH_SIZE = 3;
 const DELAY_BETWEEN_BATCHES_MS = 60 * 1000; // 1 minute delay between batches
-const PROTOCOL_TIMEOUT_MS = 180000; // 3 minutes for container environments
+const PROTOCOL_TIMEOUT_MS = 60000; // 1 minute for faster proxy failure detection
 
 // Proxy support with rotation — Proxyscrape API + static list
 const PROXY_API_KEY = process.env.PROXY_API_KEY || 'HVIsHemQvnWDqumZo9707iGXo0VpmypJaj4S51RiLUHMBtuYS1cpGcHQFSgTrshR';
@@ -1859,12 +1859,11 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
   }
 
     for (const tld of tldsToSearch) {
-        let tldSuccess = false;
-        let allEngineLinks = [];
-        let engineBrowser = null;
+    let tldSuccess = false;
+    let allEngineLinks = [];
 
-        // Rotate proxy per engine request
-        const engines = [
+    // Search engines list (defined once per TLD, reused across proxy attempts)
+    const engines = [
           {
             name: 'ddg-html',
             url: `https://html.duckduckgo.com/html/?q=${encodeURIComponent(`"${industry}" site:${tld.substring(1)}`)}`,
@@ -2038,105 +2037,158 @@ async function getWebsitesByIndustry(industry, browser, countryCode = null, dial
           }
         ];
 
-        // Rotate proxy per engine request
-        for (const eng of engines) {
-          if (tldSuccess) break;
+        // Try proxies first, then direct connection as final fallback
+        let proxyAttempts = 0;
+        const maxProxyAttempts = proxyList.length;
+        let currentProxyIndex = 0;
+        let currentProxy = proxyList.length > 0 ? proxyList[0] : null;
+        let lastProxy = null;
 
-          const proxy = getNextProxy();
-          try {
-            engineBrowser = await puppeteer.launch({
+        while (!tldSuccess && proxyAttempts <= maxProxyAttempts) {
+          // Relaunch browser when proxy changes (including proxy -> direct)
+          if (currentProxy !== lastProxy) {
+            try {
+              await browser.close();
+            } catch (e) {
+              // ignore close errors
+            }
+            if (currentProxy) {
+              console.log(`[INFO] Relaunching browser with proxy: ${currentProxy}`);
+            } else {
+              console.log(`[INFO] Relaunching browser with direct connection`);
+            }
+            browser = await puppeteer.launch({
               headless: "new",
               ignoreHTTPSErrors: true,
-              args: getLaunchArgs(proxy),
+              args: getLaunchArgs(currentProxy),
+              userDataDir: './browser_profile',
               protocolTimeout: PROTOCOL_TIMEOUT_MS,
             });
-
-            const engPage = await engineBrowser.newPage();
-            await engPage.evaluateOnNewDocument(() => {
-              Object.defineProperty(navigator, 'webdriver', {
-                get: () => false,
-              });
-              Object.defineProperty(navigator, 'plugins', {
-                get: () => [1, 2, 3, 4, 5]
-              });
-              Object.defineProperty(navigator, 'languages', {
-                get: () => ['en-US', 'en']
-              });
-            });
-
-            const randomUA = getRandomUserAgent();
-            await engPage.setUserAgent(randomUA);
-            await engPage.setExtraHTTPHeaders({
-              'Accept-Language': 'en-US,en;q=0.9',
-              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-              'Accept-Encoding': 'gzip, deflate, br',
-              'Upgrade-Insecure-Requests': '1'
-            });
-            await engPage.setViewport({ width: 1366, height: 768 });
-
-            console.log(`[INFO] Searching ${eng.name} for ${industry} site:${tld.substring(1)} via proxy ${proxy || 'direct'}`);
-            await engPage.goto(eng.url, { waitUntil: 'networkidle2', timeout: PROTOCOL_TIMEOUT_MS });
-            let pageContent = await engPage.content();
-            let isBlocked = /No results found|captcha|unusual traffic|verify you are|robot|automated|access denied|blocked|unusual activity/i.test(pageContent);
-
-            if (isBlocked && CAPTCHA_API_KEY) {
-              console.log(`[INFO] ${eng.name} captcha detected, attempting to solve...`);
-              const solved = await solveRecaptcha(engPage);
-              if (solved) {
-                await wait(randomInt(3000, 6000));
-                pageContent = await engPage.content();
-                isBlocked = /No results found|captcha|unusual traffic|verify you are|robot|automated|access denied|blocked|unusual activity/i.test(pageContent);
-              }
-            }
-
-            if (isBlocked) {
-              console.log(`[INFO] ${eng.name} appears blocked/captcha for ${industry} site:${tld.substring(1)}, skipping engine`);
-              try { if (!engPage.isClosed()) await engPage.close(); } catch (e) {}
-              try { await engineBrowser.close(); } catch (e) {}
-              engineBrowser = null;
-              await wait(randomInt(2000, 5000));
-              continue;
-            }
-            const engLinks = await engPage.$$eval(eng.selector, anchors =>
-              anchors.map(a => a.href).filter(h => h && h.startsWith('http'))
-            );
-            const cleaned = engLinks.map(eng.cleanup).filter(l => l !== null);
-            if (cleaned.length > 0) {
-              console.log(`[INFO] ${eng.name} returned ${cleaned.length} results for ${industry} site:${tld.substring(1)}`);
-              allEngineLinks.push(...cleaned);
-            } else {
-              console.log(`[INFO] ${eng.name} returned 0 results for ${industry} site:${tld.substring(1)}`);
-            }
-            try { if (!engPage.isClosed()) await engPage.close(); } catch (e) {}
-            try { await engineBrowser.close(); } catch (e) {}
-            engineBrowser = null;
-          } catch (err) {
-            console.log(`[INFO] ${eng.name} failed for ${industry} site:${tld.substring(1)}: ${err.message}, skipping engine`);
-            try { if (engPage && !engPage.isClosed()) await engPage.close(); } catch (e) {}
-            // If using a proxy and it fails, mark it as failed
-            if (proxy && err.message && (err.message.includes('ERR_CONNECTION') || err.message.includes('timeout') || err.message.includes('Protocol error') || err.message.includes('Session closed'))) {
-              markProxyFailed(proxy);
-            }
-            try { await engineBrowser.close(); } catch (e) {}
-            engineBrowser = null;
-            continue;
+            lastProxy = currentProxy;
           }
-          // Delay between engines to reduce rate limiting and captcha triggering
-          await wait(randomInt(3000, 8000));
-        }
 
-        if (engineBrowser) {
-          try { await engineBrowser.close(); } catch (e) {}
-          engineBrowser = null;
-        }
+          try {
 
-        if (allEngineLinks.length > 0) {
-          console.log(`[INFO] Total ${allEngineLinks.length} results from all engines for ${industry} site:${tld.substring(1)}`);
-          tldSuccess = true;
+            for (const eng of engines) {
+              let engPage;
+              try {
+                engPage = await browser.newPage();
+                await engPage.evaluateOnNewDocument(() => {
+                  Object.defineProperty(navigator, 'webdriver', {
+                    get: () => false,
+                  });
+                  Object.defineProperty(navigator, 'plugins', {
+                    get: () => [1, 2, 3, 4, 5]
+                  });
+                  Object.defineProperty(navigator, 'languages', {
+                    get: () => ['en-US', 'en']
+                  });
+                });
+
+                const randomUA = getRandomUserAgent();
+                await engPage.setUserAgent(randomUA);
+                await engPage.setExtraHTTPHeaders({
+                  'Accept-Language': 'en-US,en;q=0.9',
+                  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                  'Accept-Encoding': 'gzip, deflate, br',
+                  'Upgrade-Insecure-Requests': '1'
+                });
+                await engPage.setViewport({ width: 1366, height: 768 });
+
+                console.log(`[INFO] Searching ${eng.name} for ${industry} site:${tld.substring(1)} via ${currentProxy || 'direct'}`);
+                await engPage.goto(eng.url, { waitUntil: 'networkidle2', timeout: PROTOCOL_TIMEOUT_MS });
+                let pageContent = await engPage.content();
+                let isBlocked = /No results found|captcha|unusual traffic|verify you are|robot|automated|access denied|blocked|unusual activity/i.test(pageContent);
+
+                if (isBlocked && CAPTCHA_API_KEY) {
+                  console.log(`[INFO] ${eng.name} captcha detected, attempting to solve...`);
+                  const solved = await solveRecaptcha(engPage);
+                  if (solved) {
+                    await wait(randomInt(3000, 6000));
+                    pageContent = await engPage.content();
+                    isBlocked = /No results found|captcha|unusual traffic|verify you are|robot|automated|access denied|blocked|unusual activity/i.test(pageContent);
+                  }
+                }
+
+                if (isBlocked) {
+                  console.log(`[INFO] ${eng.name} appears blocked/captcha for ${industry} site:${tld.substring(1)}, skipping engine`);
+                  try { if (!engPage.isClosed()) await engPage.close(); } catch (e) {}
+                  continue;
+                }
+                const engLinks = await engPage.$$eval(eng.selector, anchors =>
+                  anchors.map(a => a.href).filter(h => h && h.startsWith('http'))
+                );
+                const cleaned = engLinks.map(eng.cleanup).filter(l => l !== null);
+              if (cleaned.length > 0) {
+                  console.log(`[INFO] ${eng.name} returned ${cleaned.length} results for ${industry} site:${tld.substring(1)}`);
+                  allEngineLinks.push(...cleaned);
+                } else {
+                  console.log(`[INFO] ${eng.name} returned 0 results for ${industry} site:${tld.substring(1)}`);
+                }
+                try { if (!engPage.isClosed()) await engPage.close(); } catch (e) {}
+              } catch (err) {
+                console.log(`[INFO] ${eng.name} failed for ${industry} site:${tld.substring(1)}: ${err.message}, skipping engine`);
+                try { if (engPage && !engPage.isClosed()) await engPage.close(); } catch (e) {}
+                if (currentProxy && err.message && (err.message.includes('ERR_CONNECTION') || err.message.includes('timeout') || err.message.includes('Protocol error') || err.message.includes('Session closed'))) {
+                  markProxyFailed(currentProxy);
+                }
+                continue;
+              }
+              // Delay between engines to reduce rate limiting and captcha triggering
+              await wait(randomInt(3000, 8000));
+            }
+
+            if (allEngineLinks.length > 0) {
+              console.log(`[INFO] Total ${allEngineLinks.length} results from all engines for ${industry} site:${tld.substring(1)}`);
+              tldSuccess = true;
+              break; // Exit proxy retry loop - success
+            }
+
+            // All engines returned 0 or were blocked
+            if (currentProxy) {
+              // Mark this proxy as failed
+              failedProxies.add(currentProxy);
+              proxyAttempts++;
+              // Move to next proxy
+              currentProxyIndex++;
+              if (currentProxyIndex < proxyList.length) {
+                currentProxy = proxyList[currentProxyIndex];
+                console.log(`[INFO] All engines failed with proxy, switching to next proxy: ${currentProxy}`);
+                continue;
+              } else {
+                // All proxies exhausted - try direct connection as final fallback
+                console.log(`[INFO] All proxies exhausted for ${industry} site:${tld.substring(1)}, trying direct connection...`);
+                currentProxy = null;
+                continue;
+              }
+            } else {
+              // Direct connection also failed - done with this TLD
+              console.log(`[INFO] Direct connection failed for ${industry} site:${tld.substring(1)}, skipping TLD`);
+              break;
+            }
+
+          } catch (error) {
+            const msg = error.message || String(error);
+            console.error(`Attempt ${proxyAttempts + 1}/${maxProxyAttempts + 1} failed for TLD ${tld}: ${msg}`);
+            if (currentProxy) {
+              failedProxies.add(currentProxy);
+            }
+            proxyAttempts++;
+            currentProxyIndex++;
+            if (currentProxyIndex < proxyList.length) {
+              currentProxy = proxyList[currentProxyIndex];
+            } else {
+              currentProxy = null;
+            }
+            if (!currentProxy) {
+              console.error(`Giving up on TLD ${tld} after exhausting all proxies and direct connection.`);
+              break;
+            }
+          }
         }
 
         // If tldSuccess, process the collected links
-        if (tldSuccess && allEngineLinks.length > 0) {
+        if (tldSuccess) {
         // Filter out excluded domains and useless sites from engine results
         const filteredLinks = allEngineLinks.filter(link => {
           try {
@@ -2922,9 +2974,10 @@ async function main(io) {
 
   let browser = await puppeteer.launch({
     headless: "new",
-    ignoreHTTPSErrors: true, // Add this line
-args: getLaunchArgs(),
-    protocolTimeout: PROTOCOL_TIMEOUT_MS, // Increase timeout for stealth plugin
+    ignoreHTTPSErrors: true,
+    args: getLaunchArgs(),
+    userDataDir: './browser_profile',
+    protocolTimeout: PROTOCOL_TIMEOUT_MS,
   });
 
   // Start email queue processor
